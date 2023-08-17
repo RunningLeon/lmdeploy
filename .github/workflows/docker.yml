@@ -1,23 +1,19 @@
 name: publish-docker
 
-on:
-  pull_request:
-    paths:
-      - "docker/Dockerfile"
-      - ".github/workflows/docker.yml"
+on: [push, pull_request]
 
-  push:
-    paths-ignore:
-      - ".github/**"
-      - "docs/**"
-      - "resources/**"
-      - "benchmark/**"
-      - "tests/**"
-      - "**/*.md"
-    branches:
-      - main
-    tags:
-      - "v*.*.*"
+#  push:
+#    paths-ignore:
+#      - ".github/**"
+#      - "docs/**"
+#      - "resources/**"
+#      - "benchmark/**"
+#      - "tests/**"
+#      - "**/*.md"
+#    branches:
+#      - main
+#    tags:
+#      - "v*.*.*"
 
 jobs:
   publish_docker_image:
