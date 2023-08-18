@@ -1,21 +1,21 @@
 name: publish-docker
 
-on:
+on: [push, pull_request]
 
- push:
-   paths-ignore:
-     - "!.github/workflows/docker.yml"
-     - ".github/**"
-     - "docs/**"
-     - "builder/**"
-     - "resources/**"
-     - "benchmark/**"
-     - "tests/**"
-     - "**/*.md"
-   branches:
-     - main
-   tags:
-     - "v*.*.*"
+#  push:
+  #  paths-ignore:
+  #    - "!.github/workflows/docker.yml"
+  #    - ".github/**"
+  #    - "docs/**"
+  #    - "builder/**"
+  #    - "resources/**"
+  #    - "benchmark/**"
+  #    - "tests/**"
+  #    - "**/*.md"
+  #  branches:
+  #    - main
+  #  tags:
+  #    - "v*.*.*"
 
 jobs:
   publish_docker_image:
@@ -61,6 +61,7 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           push: true
+          no-cache: true
           tags: ${{ env.TAG }}
           file: ./docker/Dockerfile
           build-args: |
