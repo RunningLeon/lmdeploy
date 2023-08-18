@@ -1,7 +1,6 @@
 FROM nvcr.io/nvidia/tritonserver:22.12-py3
 
-RUN rm /etc/apt/sources.list.d/nvidia-ml.list && apt-get clean && \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     rapidjson-dev libgoogle-glog-dev gdb  \
     && rm -rf /var/lib/apt/lists/*
 
@@ -18,15 +17,15 @@ RUN git clone --depth=1 https://github.com/InternLM/lmdeploy.git &&\
     python3 -m pip install -r requirements.txt &&\
     mkdir -p build && cd build &&\
     cmake .. \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-    -DCMAKE_INSTALL_PREFIX=/opt/tritonserver \
-    -DBUILD_PY_FFI=ON \
-    -DBUILD_MULTI_GPU=ON \
-    -DBUILD_CUTLASS_MOE=OFF \
-    -DBUILD_CUTLASS_MIXED_GEMM=OFF \
-    -DCMAKE_CUDA_FLAGS="-lineinfo" \
-    -DUSE_NVTX=ON &&\
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_INSTALL_PREFIX=/opt/tritonserver \
+        -DBUILD_PY_FFI=ON \
+        -DBUILD_MULTI_GPU=ON \
+        -DBUILD_CUTLASS_MOE=OFF \
+        -DBUILD_CUTLASS_MIXED_GEMM=OFF \
+        -DCMAKE_CUDA_FLAGS="-lineinfo" \
+        -DUSE_NVTX=ON &&\
     make -j$(nproc) && make install &&\
     cd .. &&\
     python3 -m pip install . &&\
