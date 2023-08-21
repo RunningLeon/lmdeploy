@@ -24,11 +24,23 @@ jobs:
     env:
       TAG_PREFIX: "openmmlab/lmdeploy"
     steps:
+      - name: Check disk space
+        run: |
+          cat /proc/cpuinfo  | grep -ic proc
+          free
+          df -h
+          df . -h
       - name: Get docker info
         run: |
           docker info
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+      - name: Checkout
+        uses: actions/checkout@v2
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
       - name: Login to Docker Hub
@@ -43,6 +55,13 @@ jobs:
           export commit_id=$(git log --format="%H" -n 1)
           echo "commit id = $commit_id"
           echo "COMMIT_ID=$commit_id" >> $GITHUB_ENV
+          rm -rf ${GITHUB_WORKSPACE}/.git
+      - name: Check disk space
+        run: |
+          cat /proc/cpuinfo  | grep -ic proc
+          free
+          df -h
+          df . -h
       - name: Get lmdeploy version
         if: startsWith(github.ref, 'refs/tags/') == false
         run: |
@@ -61,7 +80,7 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           push: true
-          no-cache: true
+          no-cache: false
           tags: ${{ env.TAG }}
           file: ./docker/Dockerfile
           build-args: |
