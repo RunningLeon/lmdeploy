@@ -53,7 +53,7 @@ def _run(model_path: str,
 
     \b
     Example:
-        > lmdeploy serve run $NAME_OR_PATH_TO_HF_MODEL \\
+        > lmdeploy serve run $MODEL_PATH \\
         > --max_new_tokens 64 \\
         > --temperture 0.8 \\
         > --top_p 0.95 \\

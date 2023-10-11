@@ -97,7 +97,7 @@ def _chat(model_path: str,
           debug: bool = False,
           adapter: Optional[str] = None,
           session_id: int = 1,
-          cap: str = 'inference',
+          cap: str = 'chat',
           sys_instruct: str = None,
           tp: int = 1,
           stream_output: bool = True,
@@ -106,7 +106,7 @@ def _chat(model_path: str,
 
     \b
     Example:
-        > lmdeploy infer chat $NAME_OR_PATH_TO_HF_MODEL \\
+        > lmdeploy infer chat $MODEL_PATH \\
         >   --engine turbomind \\
         >   --max_new_tokens 64 \\
         >   --temperture 0.8 \\

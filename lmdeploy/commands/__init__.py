@@ -4,6 +4,7 @@ import click
 
 from .convert import convert
 from .inference import inference
+from .lite import lite
 from .serve import serve
 
 
@@ -11,8 +12,8 @@ from .serve import serve
 def cli():
     """LMDeploy Command Line Interface.
 
-    The CLI provides a unified API for converting, serving and testing large
-    language models.
+    The CLI provides a unified API for converting, compressing and deploying
+    large language models.
     """
 
     pass
@@ -21,5 +22,6 @@ def cli():
 cli.add_command(convert)
 cli.add_command(inference)
 cli.add_command(serve)
+cli.add_command(lite)
 
 __all__ = ['cli']
