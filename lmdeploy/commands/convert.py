@@ -2,7 +2,6 @@
 import click
 
 from lmdeploy.model import MODELS
-from lmdeploy.serve.turbomind.deploy import main as run_convert
 from lmdeploy.serve.turbomind.deploy import supported_formats
 
 
@@ -60,6 +59,7 @@ def convert(
         > lmdeploy convert ~/internlm-chat-7b \\
         >   --model_name internlm-chat-7b
     """
+    from lmdeploy.serve.turbomind.deploy import main as run_convert
 
     run_convert(model_name,
                 model_path,

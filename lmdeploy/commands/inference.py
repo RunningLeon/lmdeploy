@@ -71,13 +71,22 @@ def inference():
               default=False,
               help='Whether to enable debug mode.')
 @click.option('--adapter', type=str, default=None, help='')
-@click.option('--session_id', type=int, default=1, help='')
+@click.option('--session_id',
+              type=int,
+              default=1,
+              help='the identical id of a session')
 @click.option('--cap',
               type=click.Choice(['completion', 'infilling', 'chat', 'python']),
               default='chat',
-              help='')
-@click.option('--sys_instruct', type=str, default=None, help='')
-@click.option('--tp', type=int, default=1, help='')
+              help='the capability of a model.')
+@click.option('--sys_instruct',
+              type=str,
+              default=None,
+              help='The number of GPUs used for tensor parallelism.')
+@click.option('--tp',
+              type=int,
+              default=1,
+              help='The number of GPUs used for tensor parallelism.')
 @click.option('--stream_output',
               is_flag=True,
               default=True,
