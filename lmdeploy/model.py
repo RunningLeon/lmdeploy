@@ -587,4 +587,5 @@ def main(model_name: str = 'test'):
 
 if __name__ == '__main__':
     import fire
+
     fire.Fire(main)
