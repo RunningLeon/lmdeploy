@@ -51,7 +51,6 @@ import itertools
 import logging
 from typing import Optional
 
-import fire
 import torch
 from transformers import GenerationConfig, PreTrainedModel
 
@@ -204,9 +203,7 @@ def main(
         sm.add_to_history(output)
 
 
-def cli():
-    fire.Fire(main)
-
-
 if __name__ == '__main__':
-    cli()
+    import fire
+
+    fire.Fire(main)

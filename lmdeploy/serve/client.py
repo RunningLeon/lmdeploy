@@ -1,8 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 
-import fire
-
 from lmdeploy.serve.turbomind.chatbot import Chatbot
 
 
@@ -69,4 +67,6 @@ def main(tritonserver_addr: str,
 
 
 if __name__ == '__main__':
+    import fire
+
     fire.Fire(main)
