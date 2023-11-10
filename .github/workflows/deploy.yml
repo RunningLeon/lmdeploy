@@ -1,0 +1,47 @@
+name: deploy
+
+on: [push, pull_request]
+
+jobs:
+  test_triton:
+    runs-on: [self-hosted, linux-a100]
+    timeout-minutes: 4320 # 72hours
+    environment: 'prod'
+    env:
+      MODEL_PATH: /nvme/shared_data/InternLM/internlm-chat-20b-w4
+      WORKSPACE: /mnt/models-new/ningsheng/internlm-chat-20b-w4-turbomind
+      TP: 4
+    steps:
+      - uses: actions/checkout@v2
+      - name: Get docker info
+        run: |
+          docker info
+      - name: Run convert
+        run: |
+          mkdir -p ${WORKSPACE}
+          docker run -it --rm --gpus=all \
+            -v ${MODEL_PATH}:/root/workspace/model \
+            -v ${WORKSPACE}:/root/worskpace/workdir \
+            --cap-add=SYS_PTRACE \
+            --cap-add=SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            --env NCCL_LAUNCH_MODE=GROUP \
+            openmmlab/lmdeploy:debug-ci \
+            lmdeploy convert \
+            --model-name internlm-20b \
+            --model-path /root/workspace/model \
+            --model-format awq \
+            --tp: ${TP} \
+            --group-size 128 \
+            --dst-path /root/worskpace/workdir
+      - name: Run triton server
+          run: |
+            python3 .github/scripts/test_triton.py ${MODEL_PATH} ${WORKSPACE}
+
+
+
+
+
+
+
+
