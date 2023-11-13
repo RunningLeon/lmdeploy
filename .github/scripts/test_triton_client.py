@@ -42,7 +42,7 @@ def test(workdir, port=33337):
         quest = cases['prompts']
         keywords = cases['keywords']
         inputs = quest + end
-        print(f'Input prompts: {quest}')
+        print(f'Test Input prompts: {quest}\nKey words: {keywords}')
         with Popen(cmd,
                    stdin=PIPE,
                    stdout=PIPE,
@@ -51,7 +51,7 @@ def test(workdir, port=33337):
                    text=True,
                    encoding='utf-8') as proc:
             out, err = proc.communicate(input=inputs)
-            proc.poll()
+            print(f'Output: {out}\nError: {err}')
             if proc.returncode == 0:
                 out = parse_dialogue(out)[0]
                 success = all([k in out for k in keywords])
