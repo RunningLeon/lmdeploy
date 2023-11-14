@@ -3,7 +3,7 @@ name: deploy
 on: [push, pull_request]
 
 jobs:
-  test_triton:
+  test_functions:
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -12,32 +12,70 @@ jobs:
       WORKSPACE: /mnt/models-new/ningsheng/workdir
       TB_MODEL: /mnt/models-new/ningsheng/internlm-chat-20b-w4-turbomind
       TP: 2
+    container:
+      image: nvcr.io/nvidia/tritonserver:22.12-py3
+      options: "--gpus=all --ipc=host --user root"
+      volumes:
+        - /mnt/models-new/github-actions/pip-cache:/root/.cache/pip
+        - /mnt/models-new/github-actions/lmdeploy-build:/__w/lmdeploy-build
     steps:
-      - uses: actions/checkout@v2
-      - name: Convert to turbomind model
+      - name: Setup systems
         run: |
-          export ROOT_DIR=$(dirname "${TB_MODEL}")
-          export BASE_NAME=$(basename "${TB_MODEL}")
-          mkdir -p ${ROOT_DIR}
-          chmod -R 777 ${ROOT_DIR}
-          docker run --rm --gpus=all \
-            -v ${HF_MODEL}:/root/workspace/model \
-            -v ${ROOT_DIR}:/root/workspace/workdir \
-            --cap-add=SYS_PTRACE \
-            --cap-add=SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --env NCCL_LAUNCH_MODE=GROUP \
-            openmmlab/lmdeploy:debug-ci \
-            lmdeploy convert \
-            --model-name internlm-20b \
-            --model-path /root/workspace/model \
-            --model-format awq \
-            --tp ${TP} \
-            --group-size 128 \
-            --dst-path /root/workspace/workdir/${BASE_NAME}
-
-          docker run --rm -v ${WORKSPACE}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
-          sed -i 's/-it //g' ${WORKSPACE}/service_docker_up.sh
-      - name: Run triton server test
+          rm /etc/apt/sources.list.d/cuda*.list
+          apt-get update && apt-get install -y --no-install-recommends rapidjson-dev libgoogle-glog-dev
+          rm -rf /var/lib/apt/lists/*
+      - name: Clone repo
+        uses: actions/checkout@v2
+      - name: Install pytorch
         run: |
-          python3 .github/scripts/test_triton.py ${TB_MODEL}
+          python3 -m pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+          python3 -m pip install cmake
+      - name: Install lmdeploy from pypi
+        run: |
+          python3 -m pip install lmdeploy[all]
+          python3 -c 'import
+          python3 -m pip install -r requirements/test.txt
+          lmdeploy check_env
+      - name: Test lmdeploy
+        run: |
+          echo "TODO"
+#
+#
+#  test_triton:
+#    runs-on: [self-hosted, linux-a100]
+#    timeout-minutes: 4320 # 72hours
+#    environment: 'prod'
+#    env:
+#      HF_MODEL: /nvme/shared_data/InternLM/internlm-chat-20b-w4
+#      WORKSPACE: /mnt/models-new/ningsheng/workdir
+#      TB_MODEL: /mnt/models-new/ningsheng/internlm-chat-20b-w4-turbomind
+#      TP: 2
+#    steps:
+#      - uses: actions/checkout@v2
+#      - name: Convert to turbomind model
+#        run: |
+#          export ROOT_DIR=$(dirname "${TB_MODEL}")
+#          export BASE_NAME=$(basename "${TB_MODEL}")
+#          mkdir -p ${ROOT_DIR}
+#          chmod -R 777 ${ROOT_DIR}
+#          docker run --rm --gpus=all \
+#            -v ${HF_MODEL}:/root/workspace/model \
+#            -v ${ROOT_DIR}:/root/workspace/workdir \
+#            --cap-add=SYS_PTRACE \
+#            --cap-add=SYS_ADMIN \
+#            --security-opt seccomp=unconfined \
+#            --env NCCL_LAUNCH_MODE=GROUP \
+#            openmmlab/lmdeploy:debug-ci \
+#            lmdeploy convert \
+#            --model-name internlm-20b \
+#            --model-path /root/workspace/model \
+#            --model-format awq \
+#            --tp ${TP} \
+#            --group-size 128 \
+#            --dst-path /root/workspace/workdir/${BASE_NAME}
+#
+#          # docker run --rm -v ${WORKSPACE}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
+#          # sed -i 's/-it //g' ${WORKSPACE}/service_docker_up.sh
+#      - name: Run triton server test
+#        run: |
+#          python3 .github/scripts/test_triton.py ${TB_MODEL}
