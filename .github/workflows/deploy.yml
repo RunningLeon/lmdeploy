@@ -11,14 +11,18 @@ jobs:
       HF_MODEL: /nvme/shared_data/InternLM/internlm-chat-20b-w4
       WORKSPACE: /mnt/models-new/ningsheng/workdir
       TB_MODEL: /mnt/models-new/ningsheng/internlm-chat-20b-w4-turbomind
-      TP: 1
+      TP: 2
     steps:
       - uses: actions/checkout@v2
-      - name: Run test
+      - name: Convert to turbomind model
         run: |
+          export ROOT_DIR=$(dirname "${TB_MODEL}")
+          export BASE_NAME=$(basename "${TB_MODEL}")
+          mkdir -p ${ROOT_DIR}
+          chmod -R 777 ${ROOT_DIR}
           docker run --rm --gpus=all \
-            -v ${HF_MODEL}:/root/TB_MODEL/model \
-            -v $(dirname "${TB_MODEL}"):/root/workspace/workdir \
+            -v ${HF_MODEL}:/root/workspace/model \
+            -v ${ROOT_DIR}:/root/workspace/workdir \
             --cap-add=SYS_PTRACE \
             --cap-add=SYS_ADMIN \
             --security-opt seccomp=unconfined \
@@ -30,7 +34,9 @@ jobs:
             --model-format awq \
             --tp ${TP} \
             --group-size 128 \
-            --dst-path /root/workspace/workdir/$(basename "${TB_MODEL}")
-      - name: Run triton server
+            --dst-path /root/workspace/workdir/${BASE_NAME}
+
+          docker run
+      - name: Run triton server test
         run: |
           python3 .github/scripts/test_triton.py ${TB_MODEL}

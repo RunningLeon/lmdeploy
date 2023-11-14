@@ -22,7 +22,7 @@ def test(model_path: str, workdir: str = None):
         workdir (str): The working directory to save results.
     """
     if workdir is None:
-        workdir = tempfile.TemporaryDirectory()
+        workdir = tempfile.TemporaryDirectory().name
     workdir = os.path.abspath(workdir)
     bash_path = os.path.join(model_path, 'service_docker_up.sh')
     os.makedirs(workdir, exist_ok=True)

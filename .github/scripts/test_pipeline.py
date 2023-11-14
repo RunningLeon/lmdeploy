@@ -1,15 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import fire
 import os
-from typing import List
+import subprocess
 from collections import OrderedDict
 from subprocess import PIPE, Popen
-import copy
-import tqdm
+from typing import List
 
+import fire
+import tqdm
 import yaml
 from tqdm import tqdm
-import subprocess
 
 
 def parse_dialogue(inputs: str):
@@ -91,7 +90,13 @@ def run_cmd(cmd, log_file, msg=''):
         f.write(f'========  {msg}  ========' + '\n')
         f.write('\\'.join(cmd) + '\n')
         f.flush()
-        ret = subprocess.run(cmd, stdout=f, stderr=f, shell=True, text=True, encoding='utf-8', check=True)
+        ret = subprocess.run(cmd,
+                             stdout=f,
+                             stderr=f,
+                             shell=True,
+                             text=True,
+                             encoding='utf-8',
+                             check=True)
         return ret.returncode
 
 
@@ -126,7 +131,8 @@ class RunPipeline(object):
         self.model_path = os.path.join(model_root, pipeline['model_path'])
         self.engine = pipeline['engine']
         self.precision = pipeline['precision']
-        self.workspace = os.path.join(workspace, self.model_name, self.engine, self.precision)
+        self.workspace = os.path.join(workspace, self.model_name, self.engine,
+                                      self.precision)
         self.source_model_path = self.model_path
         self.results = OrderedDict()
         os.makedirs(self.workspace, exist_ok=True)
@@ -147,13 +153,18 @@ class RunPipeline(object):
         if 'w4a16' in lite_cfg:
             calibrate_args = lite_cfg['w4a16']['calibrate']
             autoawq_args = lite_cfg['w4a16']['auto_awq']
-            calib_cmd = [f'lmdeploy lite calibrate {self.model_path}', f'--work_dir {workdir}']
+            calib_cmd = [
+                f'lmdeploy lite calibrate {self.model_path}',
+                f'--work_dir {workdir}'
+            ]
             calib_cmd += [f'--{k} {v}' for k, v in calibrate_args.items()]
             ret = run_cmd(calib_cmd, lite_log, msg='Run w4a16 calibrate step')
             if ret != 0:
                 self['lite'] = False
                 return False
-            autoawq_cmd = [f'lmdeploy lite auto_awq {self.model_path} {workdir}']
+            autoawq_cmd = [
+                f'lmdeploy lite auto_awq {self.model_path} {workdir}'
+            ]
             autoawq_cmd += [f'--{k} {v}' for k, v in autoawq_args.items()]
             ret = run_cmd(autoawq_cmd, lite_log, msg='Run w4a16 auto_awq step')
             if ret != 0:
@@ -171,7 +182,10 @@ class RunPipeline(object):
             self.results['convert'] = '-'
             return True
 
-        convert_cmd = [f'lmdeploy convert {self.model_name} {self.source_model_path}', f'--dst_path {self.workspace}']
+        convert_cmd = [
+            f'lmdeploy convert {self.model_name} {self.source_model_path}',
+            f'--dst_path {self.workspace}'
+        ]
         convert_cmd += [f'--{k} {v}' for k, v in convert_cfg.items()]
         ret = run_cmd(convert_cmd, convert_log, msg='Run convert step')
         success = False
@@ -216,7 +230,9 @@ class RunPipeline(object):
         api_server_args = restfulapi_cfg['api_server']
         api_client_args = restfulapi_cfg['api_client']
         server_port = api_server_args.pop('server_port', 23333)
-        server_cmd = [f'lmdeploy serve api_server {self.workspace} --server_port {server_port}']
+        server_cmd = [
+            f'lmdeploy serve api_server {self.workspace} --server_port {server_port}'
+        ]
         server_cmd += [f'--{k} {v}' for k, v in api_server_args.items()]
         url = f'http://127.0.0.1:{server_port}'
         client_cmd = [f'lmdeploy serve api_client {url}']
@@ -257,7 +273,6 @@ class RunPipeline(object):
         self.results['gradio'] = success
         return success
 
-
     def run(self):
 
         try:
@@ -296,10 +311,11 @@ class RunPipeline(object):
         return success
 
     def report(self):
-        output = [self.model_name,
-                  self.engine,
-                  self.precision,
-                  ]
+        output = [
+            self.model_name,
+            self.engine,
+            self.precision,
+        ]
         targets = ['lite', 'convert', 'chat', 'restfulapi', 'gradio']
         targets_results = [self.results.get(it, '-') for it in targets]
         all_pass = all([t in ['-', True] for t in targets_results])
@@ -308,7 +324,10 @@ class RunPipeline(object):
         return output
 
 
-def test(config_file: str, select_model: List[str] = None, precision=['fp16'], engine: str=None):
+def test(config_file: str,
+         select_model: List[str] = None,
+         precision=['fp16'],
+         engine: str = None):
 
     with open(config_file, 'r') as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
@@ -321,14 +340,18 @@ def test(config_file: str, select_model: List[str] = None, precision=['fp16'], e
     test_models = cfg['models']
     if select_model is None:
         select_model = ['torch', 'turbomind']
-    model_pipelines = filter_pipelines(test_models, select_model, precision, engine)
+    model_pipelines = filter_pipelines(test_models, select_model, precision,
+                                       engine)
     for pipeline in tqdm.tqdm(model_pipelines):
         runner = RunPipeline(pipeline, workspace_root, models_root)
         ret = runner.run()
         if not ret:
-            print(f'Failed to run {runner.model_name} {runner.engine} {runner.precision}')
+            print(
+                f'Failed to run {runner.model_name} {runner.engine} {runner.precision}'
+            )
         res = runner.report()
         print(res)
+
     # csv_path = os.path.join(workspace_root, 'convert.csv')
     # with open(csv_path, 'w') as f:
     #     header = ['model_name', 'engine', 'precision', 'lite', 'convert', 'all_pass']
@@ -340,9 +363,3 @@ def test(config_file: str, select_model: List[str] = None, precision=['fp16'], e
 
 if __name__ == '__main__':
     fire.Fire(test)
-
-
-
-
-
-
