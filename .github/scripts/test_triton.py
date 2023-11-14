@@ -31,7 +31,7 @@ def test(model_path: str, workdir: str = None):
     server_log = os.path.join(workdir, 'triton_server.log')
     client_log = os.path.join(workdir, 'triton_client.log')
     client_cmd = [
-        f'docker run -it --rm --gpus \'"device=7"\' '
+        f'docker run --rm --gpus \'"device=7"\' '
         '--network host '
         f'-v {workdir}:/root/workspace/workdir '
         f'-v {current_dir}/test_triton_client.py:/opt/test_triton_client.py '
