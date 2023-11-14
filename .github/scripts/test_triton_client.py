@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from subprocess import Popen, PIPE
+from subprocess import PIPE, Popen
 
 import fire
 
@@ -21,18 +21,22 @@ def test(workdir, port=33337):
     cmd = [f'lmdeploy serve triton_client localhost:{port}']
 
     test_cases = [
-        dict(prompts='Hello',
-             keywords=['Hello'],
-             ),
-        dict(prompts='您好',
-             keywords=['您好'],
-             ),
-        dict(prompts='How many days does a week have?',
-             keywords=['seven'],
-             ),
-        dict(prompts='一周有多少天',
-             keywords=['七天'],
-             ),
+        dict(
+            prompts='Hello',
+            keywords=['Hello'],
+        ),
+        dict(
+            prompts='您好',
+            keywords=['您好'],
+        ),
+        dict(
+            prompts='How many days does a week have?',
+            keywords=['seven'],
+        ),
+        dict(
+            prompts='一周有多少天',
+            keywords=['七天'],
+        ),
     ]
 
     sep = '\n\n'
@@ -51,7 +55,7 @@ def test(workdir, port=33337):
                    text=True,
                    encoding='utf-8') as proc:
             out, err = proc.communicate(input=inputs)
-            print(f'Output: {out}\nError: {err}')
+            print(f'Output: {out}\nError: {err}\n')
             if proc.returncode == 0:
                 out = parse_dialogue(out)[0]
                 success = all([k in out for k in keywords])
