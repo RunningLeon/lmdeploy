@@ -8,7 +8,6 @@ from typing import List
 import fire
 import tqdm
 import yaml
-from tqdm import tqdm
 
 
 def parse_dialogue(inputs: str):
@@ -231,7 +230,8 @@ class RunPipeline(object):
         api_client_args = restfulapi_cfg['api_client']
         server_port = api_server_args.pop('server_port', 23333)
         server_cmd = [
-            f'lmdeploy serve api_server {self.workspace} --server_port {server_port}'
+            f'lmdeploy serve api_server {self.workspace} '
+            f'--server_port {server_port}'
         ]
         server_cmd += [f'--{k} {v}' for k, v in api_server_args.items()]
         url = f'http://127.0.0.1:{server_port}'
@@ -261,7 +261,7 @@ class RunPipeline(object):
 
     def run_gradio(self):
         gradio_cfg = self.pipeline.get('serve', {}).get('gradio', {})
-        gradio_log = os.path.join(self.workspace, 'gradio.txt')
+        # gradio_log = os.path.join(self.workspace, 'gradio.txt')
         if not gradio_cfg:
             self.results['gradio'] = '-'
             return True
@@ -327,15 +327,19 @@ class RunPipeline(object):
 def test(config_file: str,
          select_model: List[str] = None,
          precision=['fp16'],
-         engine: str = None):
+         engine: str = None,
+         host_models_root: str = None,
+         host_workspace_root: str = None):
 
     with open(config_file, 'r') as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
 
     models_root = cfg['models_root']
     workspace_root = cfg['workspace_root']
-    host_models_root = cfg['host_models_root']
-    host_workspace_root = cfg['host_workspace_root']
+    if host_models_root is None:
+        host_models_root = cfg['host_models_root']
+    if host_workspace_root is None:
+        host_workspace_root = cfg['host_workspace_root']
 
     test_models = cfg['models']
     if select_model is None:
@@ -346,15 +350,15 @@ def test(config_file: str,
         runner = RunPipeline(pipeline, workspace_root, models_root)
         ret = runner.run()
         if not ret:
-            print(
-                f'Failed to run {runner.model_name} {runner.engine} {runner.precision}'
-            )
+            print(f'Failed to run {runner.model_name} '
+                  f'{runner.engine} {runner.precision}')
         res = runner.report()
         print(res)
 
     # csv_path = os.path.join(workspace_root, 'convert.csv')
     # with open(csv_path, 'w') as f:
-    #     header = ['model_name', 'engine', 'precision', 'lite', 'convert', 'all_pass']
+    #     header = ['model_name', 'engine', 'precision',
+    #           'lite', 'convert', 'all_pass']
     #     f.write(','.join(header) + '\n')
     #     for res in results:
     #         f.write(','.join([res[_] for _ in header]) + '\n')

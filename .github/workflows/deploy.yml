@@ -4,26 +4,30 @@ on: [push, pull_request]
 
 jobs:
   test_functions:
-    runs-on: [self-hosted, linux-a100]
+    runs-on: [self-hosted, linux-3090]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
     container:
       image: nvcr.io/nvidia/tritonserver:22.12-py3
-      options: "--gpus=all --ipc=host"
+      options: "--gpus=all --ipc=host --user root"
       volumes:
         - /mnt/models-new/github-actions/pip-cache:/root/.cache/pip
     steps:
       - name: Setup systems
         run: |
           rm /etc/apt/sources.list.d/cuda*.list
-          apt-get update && apt-get install -y --no-install-recommends rapidjson-dev libgoogle-glog-dev
+          apt-get update && apt-get install -y --no-install-recommends rapidjson-dev libgoogle-glog-dev ffmpeg libsm6 libxext6
           rm -rf /var/lib/apt/lists/*
+          export PIP_CACHE_DIR=/root/.cache/pip
+          echo "PIP_CACHE_DIR=${PIP_CACHE_DIR}" >> $GITHUB_ENV
       - name: Clone repository
         uses: actions/checkout@v2
       - name: Install pytorch
         run: |
+          echo $(pwd)
+          python3 -m pip cache dir
           python3 -m pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-          python3 -m pip install cmake
+          python3 -m pip install cmake packaging
       - name: Install lmdeploy from pypi
         if: startsWith(github.ref, 'refs/tags/') == true
         run: |
@@ -34,12 +38,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') != true
         run: |
           python3 -m pip install -r requirements.txt -r requirements/test.txt
-          ln -sf /__w/build ./build
+          cp -r /__w/build ./build
           cd build
           bash ../generate.sh
           make -j$(nproc) && make install
           cd ..
-          python3 -m pip install --user -e .
+          python3 -m pip install .
           lmdeploy check_env
       - name: Test lmdeploy
         run: |
@@ -77,8 +81,7 @@ jobs:
             --group-size 128 \
             --dst-path /root/workspace/workdir/${BASE_NAME}
 
-          # docker run --rm -v ${WORKSPACE}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
-          # sed -i 's/-it //g' ${WORKSPACE}/service_docker_up.sh
+          docker run --rm -v ${TB_MODEL}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
       - name: Run triton server test
         run: |
           python3 .github/scripts/test_triton.py ${TB_MODEL}
@@ -89,7 +92,6 @@ jobs:
     environment: 'prod'
     env:
       HF_MODEL: /data1/lmdeploy-data/internlm-chat-7b-v1_1
-      WORKSPACE: /data1/lmdeploy-data/workspace/log
       TB_MODEL: /data1/lmdeploy-data/workspace/internlm-chat-7b-v1_1-turbomind
     steps:
       - uses: actions/checkout@v2
@@ -110,8 +112,8 @@ jobs:
             --model-name internlm-chat-7b \
             --model-path /root/workspace/model \
             --dst-path /root/workspace/workdir/${BASE_NAME}
-
-          sed -i 's/-it //g' ${WORKSPACE}/service_docker_up.sh
       - name: Run triton server test
         run: |
+          docker run --rm -v ${TB_MODEL}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
+          python3 -m pip install docker
           python3 .github/scripts/test_triton.py ${TB_MODEL}

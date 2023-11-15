@@ -15,6 +15,18 @@ def print_log(log_file: str, head: str = ''):
         print(f.read())
 
 
+def get_test_script(model_path: str, container_name: str):
+    bash_path = os.path.join(model_path, 'service_docker_up.sh')
+    tmp_bash_path = os.path.join(model_path, 'tmp_service_docker_up.sh')
+    with open(tmp_bash_path, 'w') as writer, open(bash_path, 'r') as reader:
+        content = reader.read()
+        content = content.replace('-it ', '')
+        content = content.replace('--name lmdeploy',
+                                  f'--name {container_name}')
+        writer.write(content)
+    return tmp_bash_path
+
+
 def test(model_path: str, workdir: str = None):
     """Start triton server and test triton client
     Args:
@@ -24,18 +36,19 @@ def test(model_path: str, workdir: str = None):
     if workdir is None:
         workdir = tempfile.TemporaryDirectory().name
     workdir = os.path.abspath(workdir)
-    bash_path = os.path.join(model_path, 'service_docker_up.sh')
+    container_name = 'lmdeploy-ci-triton'
+    test_bash_path = get_test_script(model_path, container_name)
     os.makedirs(workdir, exist_ok=True)
-    server_cmd = [f'bash {bash_path}']
+    server_cmd = [f'bash {test_bash_path}']
     current_dir = os.path.abspath(os.path.dirname(__file__))
     server_log = os.path.join(workdir, 'triton_server.log')
     client_log = os.path.join(workdir, 'triton_client.log')
     client_cmd = [
-        f'docker run --rm --gpus \'"device=7"\' '
+        f'docker run --rm --gpus=all '
         '--network host '
         f'-v {workdir}:/root/workspace/workdir '
         f'-v {current_dir}/test_triton_client.py:/opt/test_triton_client.py '
-        f'openmmlab/lmdeploy:debug-ci '
+        f'openmmlab/lmdeploy:latest '
         f'python3 /opt/test_triton_client.py '
         f'--workdir /root/workspace/workdir'
     ]
@@ -61,7 +74,7 @@ def test(model_path: str, workdir: str = None):
     docker_client = docker.from_env()
     # 通过容器name获取容器，在service_docker_up.sh中设置的
     try:
-        server_container = docker_client.containers.get('lmdeploy')
+        server_container = docker_client.containers.get(container_name)
         server_container.stop()
     except Exception:
         pass
