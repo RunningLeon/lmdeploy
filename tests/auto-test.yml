@@ -1,0 +1,153 @@
+host_models_root: /nvme/shared_data
+host_worspace_root: ~/workspace
+
+models_root: /root/lmdeploy-auto-test/hf_models
+worskpace_root: /root/lmdeploy-auto-test/workspace
+
+
+convert: &convert_args
+  tp: 1
+
+calibrate: &calibrate_args
+  calib_dataset: c4
+  calib_samples: 128
+  calib_seqlen: 2048
+
+kv_qparams: &kv_qparams_args
+  kv_sym: False
+  num_tp: 1
+
+auto_awq: &auto_awq_args
+  w_bits: 4
+  w_group_size: 128
+
+chat_turbomind: &chat_turbomind_args
+  cap: chat
+
+chat_pytorch: &chat_pytorch_args
+  seed: 0
+
+
+gradio: &gradio_args
+  server_name: 0.0.0.0
+
+api_client: &api_client_args
+  session_id: 0
+
+api_server: &api_server_args
+  server_name: 0.0.0.0
+  server_port: 23333
+
+
+### profiling script arguments ###
+profile_generation: &profile_generation_args
+  concurrency: "1 8"
+  prompt-tokens: "1 512"
+  completion-tokens: "2048 512"
+
+profile_throughput: &profile__throughput_args
+  concurrency: 64
+
+profile_serving: &profile_servering_args
+  concurrency: 64
+
+profile_restfulapi: &profile_restfulapi_args
+  concurrency: 64
+
+prompts:
+  one_rounds:
+    chinese: &one_round_chinese
+      - question: "您好!"
+        answer: "您好！有什么我可以帮您的吗？"
+        keywords: ["您好"]
+      - question: "一周有多少天?"
+        answer: "一周有七天，分别是周一、周二、周三、周四、周五、周六、周日。"
+        keywords: ["七天"]
+    english: &one_round_english
+      - question: "Hello! "
+        answer: "Hello! How can I assist you today?"
+        keywords: ["Hello"]
+      - question: "How many days does a week have?"
+        answer: "A week has seven days."
+        keywords: ["seven"]
+  multi_rounds:
+    english: &multi_rounds_english
+      - question: "Hello! "
+        answer: "Hello! How can I assist you today?"
+        keywords: ["Hello"]
+      - question: "How many days does a week have?"
+        answer: "A week has seven days."
+        keywords: ["seven"]
+
+
+pipeline_turbomind: &pipeline_turbomind
+  precision: fp16
+  convert: *convert_args
+  lite: null
+  chat:
+    chat_args: *chat_turbomind_args
+    validators:
+      - name: validate_chat_one_round_en
+        prompts: *one_round_english
+      - name: validate_chat_one_round_zh
+        prompts: *one_round_chinese
+  serve:
+    restful_api:
+      api_server: *api_server_args
+      api_client: *api_client_args
+      validators:
+        - name: validate_chat_one_round_en
+          prompts: *one_round_english
+    gradio:
+      gradio: *gradio_args
+      validators:
+        - name: validate_chat_one_round_en
+          prompts: *one_round_english
+  profile:
+    generation: *profile_generation_args
+    throughput: *profile__throughput_args
+    serving: *profile_servering_args
+    restful_api: *profile_restfulapi_args
+  perform:
+    TODO
+
+pipeline_turbomind_w4a16: &pipeline_turbomind_w4a16
+  precision: w4a16
+  engine: turbomind
+  convert: *convert_args
+  lite:
+    w4a16:
+      calibrate: *calibrate_args
+      auto_awq: *auto_awq_args
+  chat:
+    chat_args: *chat_turbomind_args
+    validators:
+      - name: validate_chat_one_round_en
+        prompts: *one_round_english
+      - name: validate_chat_one_round_zh
+        prompts: *one_round_chinese
+  serve:
+    restful_api:
+      api_server: *api_server_args
+      api_client: *api_client_args
+      validators:
+        - name: validate_chat_one_round_en
+          prompts: *one_round_english
+    gradio:
+      gradio: *gradio_args
+      validators:
+        - name: validate_chat_one_round_en
+          prompts: *one_round_english
+
+
+pipeline_pytorch:
+  precision: fp16
+  engine: pytorch
+
+
+models:
+  - model_name: "internlm-chat-7b"
+    model_path: InternLM/internlm-chat-7b
+    pipelines:
+      - *pipeline_turbomind
+      - *pipeline_turbomind_w4a16
