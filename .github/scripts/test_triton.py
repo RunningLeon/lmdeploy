@@ -1,90 +1,69 @@
-import os
-import subprocess
-import tempfile
-import time
-from subprocess import Popen
+# Copyright (c) OpenMMLab. All rights reserved.
+from subprocess import PIPE, Popen
 
 import fire
 
-import docker
+
+def parse_dialogue(inputs: str):
+    sep = 'double enter to end input >>>'
+    dialogues = inputs.strip()
+    if dialogues.endswith(sep):
+        dialogues = dialogues[:-len(sep)]
+    dialogues = dialogues.strip()
+    dialogues = dialogues.split(sep)
+    dialogues = [d.strip() for d in dialogues]
+    return dialogues[1:]
 
 
-def print_log(log_file: str, head: str = ''):
-    print(head)
-    with open(log_file, 'r') as f:
-        print(f.read())
+def test(port=33337):
+    cmd = [f'lmdeploy serve triton_client localhost:{port}']
 
-
-def get_test_script(model_path: str, container_name: str):
-    bash_path = os.path.join(model_path, 'service_docker_up.sh')
-    tmp_bash_path = os.path.join(model_path, 'tmp_service_docker_up.sh')
-    with open(tmp_bash_path, 'w') as writer, open(bash_path, 'r') as reader:
-        content = reader.read()
-        content = content.replace('-it ', '')
-        content = content.replace('--name lmdeploy',
-                                  f'--name {container_name}')
-        writer.write(content)
-    return tmp_bash_path
-
-
-def test(model_path: str, workdir: str = None):
-    """Start triton server and test triton client
-    Args:
-        model_path (str): The turbomind model directory.
-        workdir (str): The working directory to save results.
-    """
-    if workdir is None:
-        workdir = tempfile.TemporaryDirectory().name
-    workdir = os.path.abspath(workdir)
-    container_name = 'lmdeploy-ci-triton'
-    test_bash_path = get_test_script(model_path, container_name)
-    os.makedirs(workdir, exist_ok=True)
-    server_cmd = [f'bash {test_bash_path}']
-    current_dir = os.path.abspath(os.path.dirname(__file__))
-    server_log = os.path.join(workdir, 'triton_server.log')
-    client_log = os.path.join(workdir, 'triton_client.log')
-    client_cmd = [
-        f'docker run --rm --gpus=all '
-        '--network host '
-        f'-v {workdir}:/root/workspace/workdir '
-        f'-v {current_dir}/test_triton_client.py:/opt/test_triton_client.py '
-        f'openmmlab/lmdeploy:latest '
-        f'python3 /opt/test_triton_client.py '
-        f'--workdir /root/workspace/workdir'
+    test_cases = [
+        dict(
+            prompts='Hello',
+            keywords=['Hello'],
+        ),
+        dict(
+            prompts='您好',
+            keywords=['您好'],
+        ),
+        dict(
+            prompts='How many days does a week have?',
+            keywords=['seven'],
+        ),
+        dict(
+            prompts='一周有多少天',
+            keywords=['七天'],
+        ),
     ]
-    with open(server_log, 'w') as f_server, open(client_log, 'w') as f_client:
-        print('Starting triton server ...')
-        proc_server = Popen(server_cmd,
-                            stdout=f_server,
-                            stderr=f_server,
-                            shell=True,
-                            encoding='utf-8',
-                            text=True)
-        time.sleep(60)  # wait triton server to start up
-        print('Starting running triton client ...')
-        ret = subprocess.run(client_cmd,
-                             stdout=f_client,
-                             stderr=f_client,
-                             shell=True,
-                             text=True,
-                             check=False)
-        print(f'Return code from triton client: {ret.returncode}')
-        success = (ret.returncode == 0) and (proc_server.returncode is None)
 
-    docker_client = docker.from_env()
-    # 通过容器name获取容器，在service_docker_up.sh中设置的
-    try:
-        server_container = docker_client.containers.get(container_name)
-        server_container.stop()
-    except Exception:
-        pass
-
-    print_log(server_log,
-              '\n============== Triton Server Log ==============\n')
-    print_log(client_log,
-              '\n============== Triton Client Log ==============\n')
-    print(f'Finish with success = {success}')
-    assert success
+    sep = '\n\n'
+    end = sep + 'exit\n\n\n'
+    all_pass = True
+    for cases in test_cases:
+        quest = cases['prompts']
+        keywords = cases['keywords']
+        inputs = quest + end
+        print(f'Test Input prompts: {quest}\nKey words: {keywords}')
+        with Popen(cmd,
+                   stdin=PIPE,
+                   stdout=PIPE,
+                   stderr=PIPE,
+                   shell=True,
+                   text=True,
+                   encoding='utf-8') as proc:
+            out, err = proc.communicate(input=inputs)
+            print(f'Output: {out}\nError: {err}\n')
+            if proc.returncode == 0:
+                out = parse_dialogue(out)[0]
+                success = all([k in out for k in keywords])
+                if not success:
+                    print(f'Failed to output keywords: {out} {keywords}')
+                    all_pass = False
+            else:
+                all_pass = False
+                print(f'Failed to get outputs: {out} {err}')
+    assert all_pass
 
 
 if __name__ == '__main__':
