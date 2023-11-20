@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os
 from subprocess import PIPE, Popen
 
 import fire
@@ -16,8 +15,7 @@ def parse_dialogue(inputs: str):
     return dialogues[1:]
 
 
-def test(workdir, port=33337):
-    os.makedirs(workdir, exist_ok=True)
+def test(port=33337):
     cmd = [f'lmdeploy serve triton_client localhost:{port}']
 
     test_cases = [

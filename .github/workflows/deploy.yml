@@ -13,9 +13,13 @@ on: [push, pull_request]
 #        type: boolean
 #        default: false
 
+env:
+  PIP_CACHE_DIR: /nvme/github-actions/pip-cache
+
+
 jobs:
   test_functions:
-    if: startsWith(github.ref, 'refs/tags/') == true
+    # if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -47,6 +51,7 @@ jobs:
       - name: Install lmdeploy from source
         if: startsWith(github.ref, 'refs/tags/') != true
         run: |
+          python3 -m pip install flash-attn --no-build-isolation
           python3 -m pip install -r requirements.txt -r requirements/test.txt
           cp -r /__w/build ./build
           cd build
@@ -63,120 +68,115 @@ jobs:
         run: |
           export repo_root=$(pwd)
           echo $repo_root
-          chmod -R 777 $repo_root
           rm -rf $repo_root/*
 
-  test_triton_a100:
+  test_triton:
     # if: inputs.test_triton == true || startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
     env:
-      HF_MODEL: /nvme/qa_test_models/internlm-chat-20b
-      WORKSPACE: /nvme/qa_test_models/triton_workspace/internlm-chat-20b-w4
-      TB_MODEL: /nvme/qa_test_models/autotest_model/internlm-chat-20b-w4-turbomind
-    steps:
-      - uses: actions/checkout@v2
-      - name: Generate Quantization Parameter
-        run: |
-          docker run --rm --gpus='"device=6,7"' \
-            -v ${HF_MODEL}:/root/workspace/model \
-            -v ${WORKSPACE}:/root/workspace/workdir \
-            --cap-add=SYS_PTRACE \
-            --cap-add=SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --env NCCL_LAUNCH_MODE=GROUP \
-            openmmlab/lmdeploy:latest \
-            lmdeploy lite calibrate \
-            --model /root/workspace/model \
-            --calib_dataset 'c4' \
-            --calib_samples 128 \
-            --calib_seqlen 2048 \
-            --work_dir /root/workspace/workdir
-      - name: Quantize Weights
-        run: |
-          docker run --rm --gpus='"device=6,7"' \
-            -v ${HF_MODEL}:/root/workspace/model \
-            -v ${WORKSPACE}:/root/workspace/workdir \
-            --cap-add=SYS_PTRACE \
-            --cap-add=SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --env NCCL_LAUNCH_MODE=GROUP \
-            openmmlab/lmdeploy:latest \
-            lmdeploy lite auto_awq \
-            --model /root/workspace/model \
-            --w_bits 4 \
-            --w_group_size 128 \
-            --work_dir /root/workspace/workdir
-      - name: Convert to turbomind model
-        run: |
-          export ROOT_DIR=$(dirname "${TB_MODEL}")
-          export BASE_NAME=$(basename "${TB_MODEL}")
-          mkdir -p ${ROOT_DIR}
-          docker run --rm --gpus='"device=6,7"' \
-            -v ${WORKSPACE}:/root/workspace/model \
-            -v ${ROOT_DIR}:/root/workspace/workdir \
-            --cap-add=SYS_PTRACE \
-            --cap-add=SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --env NCCL_LAUNCH_MODE=GROUP \
-            openmmlab/lmdeploy:latest \
-            lmdeploy convert \
-            --model-name internlm-20b \
-            --model-path /root/workspace/model \
-            --model-format awq \
-            --tp 2 \
-            --group-size 128 \
-            --dst-path /root/workspace/workdir/${BASE_NAME}
-      - name: Run triton server test
-        run: |
-          docker run --rm -v ${TB_MODEL}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
-          python3 -m pip install docker
-          python3 .github/scripts/test_triton.py ${TB_MODEL}
-      - name: Clear workfile
-        if: always()
-        run: |
-          export repo_root=$(pwd)
-          echo $repo_root
-          chmod -R 777 $repo_root
-          rm -rf $repo_root/*
-
-  test_triton_3090:
-    if: inputs.test_triton == true || startsWith(github.ref, 'refs/tags/') == true
-    runs-on: [self-hosted, linux-3090]
-    timeout-minutes: 4320 # 72hours
-    environment: 'prod'
-    env:
-      HF_MODEL: /data1/lmdeploy-data/internlm-chat-7b-v1_1
-      TB_MODEL: /data1/lmdeploy-data/workspace/internlm-chat-7b-v1_1-turbomind
+      HF_MODEL: /nvme/qa_test_models/puyu-123b-w4a16-hf-v0.8.11
+      WORKDIR: /nvme/qa_test_models/triton_workspace
     steps:
       - name: Clone repository
         uses: actions/checkout@v2
-      - name: Convert to turbomind model
+      - name: Create server container
         run: |
-          export ROOT_DIR=$(dirname "${TB_MODEL}")
-          export BASE_NAME=$(basename "${TB_MODEL}")
-          mkdir -p ${ROOT_DIR}
-          docker run --rm --gpus=all \
-            -v ${HF_MODEL}:/root/workspace/model \
-            -v ${ROOT_DIR}:/root/workspace/workdir \
+          export SERVER_ID=$(docker create \
+            --rm \
+            --gpus='"device=4,5,6,7"' \
+            --ipc=host \
+            --user root \
+            --shm-size 16g \
+            -p 33336:22 \
+            -p 33337-33400:33337-33400 \
             --cap-add=SYS_PTRACE \
             --cap-add=SYS_ADMIN \
             --security-opt seccomp=unconfined \
+            --name lmdeploy-ci-triton-server \
+            --workdir /__w/lmdeploy/lmdeploy \
+            --env PIP_CACHE_DIR=/root/.cache/pip \
             --env NCCL_LAUNCH_MODE=GROUP \
-            openmmlab/lmdeploy:latest \
-            lmdeploy convert \
-            --model-name internlm-chat-7b \
-            --model-path /root/workspace/model \
-            --dst-path /root/workspace/workdir/${BASE_NAME}
-      - name: Run triton server test
+            --env http_proxy=${{secrets.PROXY}} \
+            --env https_proxy=${{secrets.PROXY}} \
+            -v $(pwd)/../../:/__w \
+            -v ${HF_MODEL}:/root/workspace/hf_model \
+            -v ${WORKDIR}:/root/workspace/workdir \
+            -v ${PIP_CACHE_DIR}:/root/.cache/pip \
+            --entrypoint "tail" \
+            openmmlab/lmdeploy:latest "-f" "/dev/null" \
+             )
+          docker start $SERVER_ID
+          echo "SERVER_ID=$SERVER_ID"
+          echo "SERVER_ID=$SERVER_ID"  >> $GITHUB_ENV
+      - name: Build lmdeploy inside server container
         run: |
-          docker run --rm -v ${TB_MODEL}:/opt/tmpdir openmmlab/lmdeploy:latest chmod -R 777 /opt/tmpdir
-          python3 -m pip install docker
-          python3 .github/scripts/test_triton.py ${TB_MODEL}
+          docker exec $SERVER_ID cp -r /__w/build /__w/lmdeploy/lmdeploy/build
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build $SERVER_ID  sh ../generate.sh
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build $SERVER_ID  make -j$(nproc)
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build $SERVER_ID  make install
+      - name: Install lmdeploy inside server container
+        run: |
+          docker exec $SERVER_ID python3 -m pip install tritonclient[grpc]
+          docker exec $SERVER_ID python3 -m pip install -r requirements/test.txt
+          docker exec $SERVER_ID python3 -m pip install .
+          # docker exec $SERVER_ID check_env
+      - name: Convert to turbomind model
+        run: |
+          docker exec $SERVER_ID \
+            lmdeploy convert \
+            --model-name internlm-20b \
+            --model-path /root/workspace/hf_model \
+            --model-format awq \
+            --tp 4 \
+            --group-size 128 \
+            --dst-path /root/workspace/workdir/tb_model
+
+          docker exec $SERVER_ID chmod -R 777 /root/workspace/workdir/tb_model
+      - name: Start triton server
+        run: |
+          docker exec --detach $SERVER_ID \
+            tritonserver \
+            --model-repository=/root/workspace/workdir/tb_model/model_repository \
+            --allow-http=0 \
+            --allow-grpc=1 \
+            --grpc-port=33337 \
+            --log-verbose=0 \
+            --allow-metrics=1
+      - name: Create client container
+        run: |
+          export CLIENT_ID=$(docker create \
+            --gpus='"device=0"' \
+            --rm \
+            --workdir /__w/lmdeploy/lmdeploy \
+            --network host \
+            --env PIP_CACHE_DIR=/root/.cache/pip \
+            --env http_proxy=${{secrets.PROXY}} \
+            --env https_proxy=${{secrets.PROXY}} \
+            -v $(pwd)/../../:/__w \
+            -v ${WORKDIR}:/root/workspace/workdir \
+            -v ${PIP_CACHE_DIR}:/root/.cache/pip \
+            --entrypoint "tail" \
+            openmmlab/lmdeploy:latest "-f" "/dev/null" \
+             )
+          docker start $CLIENT_ID
+          echo "CLIENT_ID=$CLIENT_ID"
+          echo "CLIENT_ID=$CLIENT_ID"  >> $GITHUB_ENV
+      - name: Install lmdeploy inside client container
+        run: |
+          docker exec $SERVER_ID python3 -m pip install tritonclient[grpc]
+          docker exec $SERVER_ID python3 -m pip install -r requirements/test.txt
+          docker exec $CLIENT_ID python3 -m pip install .
+          # docker exec $CLIENT_ID check_env
+      - name: Test triton server
+        run: |
+          docker exec $CLIENT_ID python3 .github/scripts/test_triton.py
       - name: Clear workfile
         if: always()
         run: |
+          docker exec $SERVER_ID rm -rf build lmdeploy/bin lmdeploy/lib lmdeploy.egg-info
+          docker stop $SERVER_ID $CLIENT_ID
           export repo_root=$(pwd)
           echo $repo_root
           chmod -R 777 $repo_root
