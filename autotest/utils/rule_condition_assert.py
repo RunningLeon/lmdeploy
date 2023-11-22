@@ -1,52 +1,48 @@
 def assert_result(input, rule_condition):
-    for rule in rule_condition:
-        operator = rule.get('operator')
-        value = rule.get('value')
-        if operator == 'in':
-            if isinstance(value, list):
-                tmpResult = False
-                for word in value:
-                    if word in input:
-                        tmpResult = True
-                if not tmpResult:
-                    return False, "keyword doesn't exist: " + ','.join(value)
-            else:
-                if value not in input:
-                    return False, "keyword doesn't exist: " + value
-        if operator == 'not_in':
-            if isinstance(value, list):
-                for word in value:
-                    if word in input:
-                        return False, "keyword shouldn't exist: " + word
-            else:
-                if value not in input:
-                    return False, "keyword doesn't exist: " + value
-        if operator == 'len_g':
-            if len(input) < value:
-                return False, 'length: ' + str(
-                    len(input)) + ', should greater than ' + str(value)
-    return True, ''
+    input = input.lower()
+    for dict in rule_condition:
+        if dict is None:
+            return True, ''
+        for rule in dict:
+            operator = list(rule.keys())[0]
+            value = list(rule.values())[0]
+            if operator == 'contain':
+                if isinstance(value, list):
+                    tmpResult = False
+                    for word in value:
+                        if word.lower() in input:
+                            tmpResult = True
+                    if tmpResult is False:
+                        return False, ','.join(
+                            value) + " doesn't exist in " + input
+                else:
+                    if value.lower() not in input:
+                        msg = value + " doesn't exist in:" + input
+                        return False, msg
+            if operator == 'not_contain':
+                if isinstance(value, list):
+                    for word in value:
+                        if word.lower() in input:
+                            msg = word + " shouldn't exist in:" + input
+                            return False, msg
+                else:
+                    if value.lower() in input:
+                        msg = value + " shouldn't exist in " + input
+                        return False, msg
+            if operator == 'len_g':
+                if len(input) < int(value):
+                    return False, input + ' length: ' + str(
+                        len(input)) + ', should greater than ' + str(value)
+        return True, ''
 
 
 if __name__ == '__main__':
-    input = '成都的景点\n您好，以下是成都的景点推荐。'
-    condition = [{
-        'operator': 'len_g',
-        'value': 10
+    input = '成都的景点hot potdddd'
+    condition = ([[{
+        'contain': ['hot pot']
     }, {
-        'operator': 'not_in',
-        'value': ['。']
+        'contain': ['。']
     }, {
-        'operator': 'not_in',
-        'value': '。'
-    }, {
-        'operator': 'in',
-        'value': ['，']
-    }, {
-        'operator': 'in',
-        'value': ['。']
-    }, {
-        'operator': 'len_g',
-        'value': 10
-    }]
+        'len_g': [10]
+    }]])
     print(assert_result(input, condition))

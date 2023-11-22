@@ -21,6 +21,8 @@ def restfulOpenAiChatTest(config, model, url):
     result = True
 
     api_client = APIClient(url)
+    file.writelines('available_models:' +
+                    ','.join(api_client.available_models) + '\n')
     model_name = model
 
     for case_detail in sorted(data, key=lambda x: x['order']):
