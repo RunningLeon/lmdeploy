@@ -53,7 +53,7 @@ def test(port=33337):
                    text=True,
                    encoding='utf-8') as proc:
             out, err = proc.communicate(input=inputs)
-            print(f'Output: {out}\nError: {err}\n')
+            print(f'Output: {out}')
             if proc.returncode == 0:
                 out = parse_dialogue(out)[0]
                 success = all([k in out for k in keywords])
@@ -63,7 +63,7 @@ def test(port=33337):
             else:
                 all_pass = False
                 print(f'Failed to get outputs: {out} {err}')
-    assert all_pass
+    assert all_pass, 'Tests failed!'
 
 
 if __name__ == '__main__':
