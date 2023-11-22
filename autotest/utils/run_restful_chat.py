@@ -57,6 +57,6 @@ def restfulOpenAiChatTest(config, model, url):
 
 
 if __name__ == '__main__':
-    url = 'http://10.140.0.187:60006'
-    config = {'log_path': '/home/PJLAB/zhulin1/code/qa_lmdeploy'}
+    url = 'http://7:60006'
+    config = {'log_path': '/home/zhulin'}
     restfulOpenAiChatTest(config, 'test', url)
