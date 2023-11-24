@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import time
 from subprocess import PIPE, Popen
 
 import fire
@@ -45,6 +46,8 @@ def test(port=33337):
         keywords = cases['keywords']
         inputs = quest + end
         print(f'Test Input prompts: {quest}\nKey words: {keywords}')
+        time.sleep(5)
+
         with Popen(cmd,
                    stdin=PIPE,
                    stdout=PIPE,

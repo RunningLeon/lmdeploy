@@ -1,17 +1,36 @@
 name: deploy
 
-on: [push, pull_request]
-#  push:
-#    tags:
-#      - "v*.*.*"
-#
-#  workflow_dispatch:
-#    inputs:
-#      test_triton:
-#        description: 'Manually test triton'
-#        required: false
-#        type: boolean
-#        default: false
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/test_triton.py"
+      - ".github/workflows/deploy.yml"
+      - "autotest/**"
+      - "cmake/**"
+      - "src/**"
+      - "tests/**"
+      - "autotest/**"
+      - "3rdparty/**"
+      - "lmdeploy/**"
+      - "requirements/**"
+      - "requirements.txt"
+      - "CMakeLists.txt"
+      - "setup.py"
+  push:
+    branches:
+      - main
+    paths:
+      - "lmdeploy/version.py"
+    tags:
+      - "v*.*.*"
+
+  workflow_dispatch:
+    inputs:
+      markers:
+        required: false
+        description: 'Tested markers. eg: "-m internlm_chat_7b"'
+        type: string
+        default: ''
 
 env:
   HOST_PIP_CACHE_DIR: /nvme/github-actions/pip-cache
@@ -20,7 +39,6 @@ env:
 
 jobs:
   test_functions:
-    # if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -75,12 +93,12 @@ jobs:
           # lmdeploy check_env
       - name: Test lmdeploy
         run: |
-          pytest autotest -m internlm_chat_7b --alluredir=allure-results --clean-alluredir
+          pytest autotest ${{github.event.inputs.markers}} --alluredir=allure-results --clean-alluredir
       - name: Generate reports
         if: always()
         run: |
-          export date_today=$(date +'%Y%m%d-%H%M%S')
-          export report_dir="$REPORT_DIR/$date_today
+          export date_today="$(date +'%Y%m%d-%H%M%S')"
+          export report_dir="$REPORT_DIR/$date_today"
           echo "Save report to $ALLURE_DIR"
           allure generate -c -o $report_dir
       - name: Clear workfile
@@ -93,7 +111,6 @@ jobs:
           chmod -R 777 $workdir
 
   test_triton:
-    # if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
