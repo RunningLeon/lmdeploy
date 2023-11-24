@@ -27,6 +27,9 @@ jobs:
       options: "--gpus=all --ipc=host --user root -e PIP_CACHE_DIR=/root/.cache/pip"
       volumes:
         - /nvme/github-actions/pip-cache:/root/.cache/pip
+        - /nvme/qa_test_models:/nvme/qa_test_models
+        - /nvme/qa_test_models/autotest_model:/nvme/qa_test_models/autotest_model
+        - /nvme/qa_test_models/autotest_model/log:/nvme/qa_test_models/autotest_model/log
     steps:
       - name: Setup systems
         run: |
@@ -60,14 +63,14 @@ jobs:
           lmdeploy check_env
       - name: Test lmdeploy
         run: |
-          echo "TODO"
+          pytest autotest -m Qwen_7B_Chat --alluredir=allure-results --clean-alluredir
       - name: Clear workfile
         if: always()
         run: |
           rm -rf .git ./*
 
   test_triton:
-    # if: inputs.test_triton == true || startsWith(github.ref, 'refs/tags/') == true
+    if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -101,27 +104,27 @@ jobs:
           docker start $CONTAINER_ID
           echo "CONTAINER_ID=$CONTAINER_ID"
           echo "CONTAINER_ID=$CONTAINER_ID"  >> $GITHUB_ENV
-#      - name: Build lmdeploy from source
-#        run: |
-#          docker exec $CONTAINER_ID cp -r ../../build build
-#          docker exec --workdir /__w/lmdeploy/lmdeploy/build \
-#            --env http_proxy=${{secrets.PROXY}} \
-#            --env https_proxy=${{secrets.PROXY}} \
-#            $CONTAINER_ID  sh ../generate.sh
-#          docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make -j$(nproc)
-#          docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make install
-#      - name: Install lmdeploy
-#        run: |
-#          docker exec \
-#            --env http_proxy=${{secrets.PROXY}} \
-#            --env https_proxy=${{secrets.PROXY}} \
-#            $CONTAINER_ID python3 -m pip install tritonclient[grpc]
-#          docker exec \
-#            --env http_proxy=${{secrets.PROXY}} \
-#            --env https_proxy=${{secrets.PROXY}} \
-#            $CONTAINER_ID python3 -m pip install -r requirements/test.txt
-#          docker exec $CONTAINER_ID python3 -m pip install .
-#          # docker exec $CONTAINER_ID check_env
+      - name: Build lmdeploy from source
+        run: |
+          docker exec $CONTAINER_ID cp -r ../../build build
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build \
+            --env http_proxy=${{secrets.PROXY}} \
+            --env https_proxy=${{secrets.PROXY}} \
+            $CONTAINER_ID  sh ../generate.sh
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make -j$(nproc)
+          docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make install
+      - name: Install lmdeploy
+        run: |
+          docker exec \
+            --env http_proxy=${{secrets.PROXY}} \
+            --env https_proxy=${{secrets.PROXY}} \
+            $CONTAINER_ID python3 -m pip install tritonclient[grpc]
+          docker exec \
+            --env http_proxy=${{secrets.PROXY}} \
+            --env https_proxy=${{secrets.PROXY}} \
+            $CONTAINER_ID python3 -m pip install -r requirements/test.txt
+          docker exec $CONTAINER_ID python3 -m pip install .
+          # docker exec $CONTAINER_ID check_env
       - name: Convert to turbomind model
         run: |
           docker exec $CONTAINER_ID \

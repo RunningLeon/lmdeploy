@@ -1,2 +1,4 @@
+allure-pytest
 coverage
 pytest
+pyyaml
