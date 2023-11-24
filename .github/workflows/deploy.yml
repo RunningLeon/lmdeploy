@@ -15,7 +15,7 @@ on: [push, pull_request]
 
 env:
   HOST_PIP_CACHE_DIR: /nvme/github-actions/pip-cache
-
+  HOST_LOCALTIME: /usr/share/zoneinfo/Asia/Shanghai
 jobs:
   test_functions:
     # if: startsWith(github.ref, 'refs/tags/') == true
@@ -29,14 +29,16 @@ jobs:
       options: "--gpus=all --ipc=host --user root -e PIP_CACHE_DIR=/root/.cache/pip"
       volumes:
         - /nvme/github-actions/pip-cache:/root/.cache/pip
+        - /nvme/github-actions/packages:/root/packages
         - /nvme/qa_test_models:/nvme/qa_test_models
-        - /nvme/qa_test_models/autotest_model:/nvme/qa_test_models/autotest_model
-        - /nvme/qa_test_models/autotest_model/log:/nvme/qa_test_models/autotest_model/log
+        - /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime:ro
     steps:
       - name: Setup systems
         run: |
           rm /etc/apt/sources.list.d/cuda*.list
-          apt-get update && apt-get install -y --no-install-recommends rapidjson-dev libgoogle-glog-dev libgl1
+          apt-get update && apt-get install -y --no-install-recommends rapidjson-dev \
+              libgoogle-glog-dev libgl1 openjdk-8-jre-headless
+          dpkg -i /root/packages/allure_2.24.1-1_all.deb
           rm -rf /var/lib/apt/lists/*
       - name: Clone repository
         uses: actions/checkout@v2
@@ -75,8 +77,9 @@ jobs:
       - name: Generate reports
         if: always()
         run: |
-          export report_dir="$REPORT_DIR/$GITHUB_RUN_ID"
-          echo "Save report to $report_dir"
+          export date_today=$(date +'%Y%m%d-%H%M%S')
+          export report_dir="$REPORT_DIR/$date_today
+          echo "Save report to $ALLURE_DIR"
           allure generate -c -o $report_dir
       - name: Clear workfile
         if: always()
@@ -84,7 +87,7 @@ jobs:
           rm -rf .git ./*
 
   test_triton:
-    if: startsWith(github.ref, 'refs/tags/') == true
+    # if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -113,6 +116,7 @@ jobs:
             -v ${HF_MODEL}:/root/workspace/hf_model \
             -v ${WORKDIR}:/root/workspace/workdir \
             -v ${HOST_PIP_CACHE_DIR}:/root/.cache/pip \
+            -v ${HOST_LOCALTIME}:/etc/localtime:ro \
             openmmlab/lmdeploy:latest tail -f /dev/null \
              )
           docker start $CONTAINER_ID
@@ -124,7 +128,17 @@ jobs:
           docker exec --workdir /__w/lmdeploy/lmdeploy/build \
             --env http_proxy=${{secrets.PROXY}} \
             --env https_proxy=${{secrets.PROXY}} \
-            $CONTAINER_ID  sh ../generate.sh
+            $CONTAINER_ID  cmake .. \
+               -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+               -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+               -DCMAKE_INSTALL_PREFIX=./install \
+               -DBUILD_PY_FFI=ON \
+               -DBUILD_MULTI_GPU=ON \
+               -DCMAKE_CUDA_FLAGS="-lineinfo" \
+               -DUSE_NVTX=ON \
+               -DSM=80 \
+               -DCMAKE_CUDA_ARCHITECTURES=80 \
+               -DBUILD_TEST=OFF
           docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make -j$(nproc)
           docker exec --workdir /__w/lmdeploy/lmdeploy/build $CONTAINER_ID  make install
       - name: Install lmdeploy
