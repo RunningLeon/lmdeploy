@@ -56,6 +56,7 @@ jobs:
           python3 -m pip install flash-attn --no-build-isolation
           python3 -m pip install -r requirements.txt -r requirements/test.txt
           mkdir build
+          cd build
           bash ../generate.sh
           make -j$(nproc) && make install
           cd ..
