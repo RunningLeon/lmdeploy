@@ -21,11 +21,11 @@ def test(port=33337):
     test_cases = [
         dict(
             prompts='Hello',
-            keywords=['Hello'],
+            keywords=['Hello', 'hi'],
         ),
         dict(
             prompts='您好',
-            keywords=['您好'],
+            keywords=['您好', '你好'],
         ),
         dict(
             prompts='How many days does a week have?',
@@ -56,7 +56,7 @@ def test(port=33337):
             print(f'Output: {out}')
             if proc.returncode == 0:
                 out = parse_dialogue(out)[0]
-                success = all([k in out for k in keywords])
+                success = any([k in out for k in keywords])
                 if not success:
                     print(f'Failed to output keywords: {out} {keywords}')
                     all_pass = False

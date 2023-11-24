@@ -18,7 +18,7 @@ env:
 
 jobs:
   test_functions:
-    if: startsWith(github.ref, 'refs/tags/') == true
+    # if: startsWith(github.ref, 'refs/tags/') == true
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
@@ -64,11 +64,7 @@ jobs:
       - name: Clear workfile
         if: always()
         run: |
-          export repo_root=$(pwd)
-          echo $repo_root
-          chmod -R 777 $repo_root
-          rm -rf .git
-          rm -rf $repo_root/*
+          rm -rf .git ./*
 
   test_triton:
     # if: inputs.test_triton == true || startsWith(github.ref, 'refs/tags/') == true
@@ -134,8 +130,6 @@ jobs:
             --model-path /root/workspace/hf_model \
             --tp 2 \
             --dst-path /root/workspace/workdir/${TB_MODEL}
-
-          docker exec $CONTAINER_ID chmod -R 777 /root/workspace/workdir/${TB_MODEL}
       - name: Start triton server service
         run: |
           docker exec --detach $CONTAINER_ID \
@@ -146,8 +140,8 @@ jobs:
             --grpc-port=${GRPC_PORT} \
             --log-verbose=0 \
             --allow-metrics=1
-          sleep 300s
-          nvidia-smi
+          # wait for triton server to start up
+          sleep 180s
       - name: Test triton server
         run: |
           docker exec \
@@ -157,10 +151,5 @@ jobs:
         if: always()
         run: |
           docker exec $CONTAINER_ID rm -rf /root/workspace/workdir/${TB_MODEL}
-          docker exec $CONTAINER_ID rm -rf build lmdeploy/bin lmdeploy/lib lmdeploy.egg-info core*
+          docker exec --workdir /__w/lmdeploy/lmdeploy $CONTAINER_ID rm -rf .git ./*
           docker stop $CONTAINER_ID
-          export repo_root=$(pwd)
-          echo $repo_root
-          chmod -R 777 $repo_root
-          rm -rf .git
-          rm -rf $repo_root/*
