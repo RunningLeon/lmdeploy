@@ -46,6 +46,7 @@ jobs:
           python3 -m pip install cmake packaging
       - name: Build lmdeploy
         run: |
+          python3 -m pip install -r requirements/build.txt
           # use cached build
           cp -r ../../build build
           cd build
