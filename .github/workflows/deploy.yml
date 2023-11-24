@@ -22,6 +22,8 @@ jobs:
     runs-on: [self-hosted, linux-a100]
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
+    env:
+      REPORT_DIR: /nvme/qa_test_models/test-reports
     container:
       image: nvcr.io/nvidia/tritonserver:22.12-py3
       options: "--gpus=all --ipc=host --user root -e PIP_CACHE_DIR=/root/.cache/pip"
@@ -70,6 +72,9 @@ jobs:
       - name: Test lmdeploy
         run: |
           pytest autotest -m Qwen_7B_Chat --alluredir=allure-results --clean-alluredir
+          export report_dir="$REPORT_DIR/$GITHUB_RUN_ID"
+          echo "Save report to $report_dir"
+          allure generate -c -o $report_dir
       - name: Clear workfile
         if: always()
         run: |

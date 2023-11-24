@@ -59,7 +59,15 @@ def test_quantization_Qwen_14B_Chat(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    log_info = ''
+    with open(quantization_param_log, 'r') as f:
+        log_info += '\n=== quantization_param_log ===\n'
+        log_info += f.read()
+
+    with open(quantization_log, 'r') as f:
+        log_info += '\n=== quantization_log ===\n'
+        log_info += f.read()
+    assert result, log_info
 
 
 @pytest.mark.quantization
