@@ -1,0 +1,3 @@
+model_path: /nvme/qa_test_models
+dst_path: /nvme/qa_test_models/autotest_model
+log_path: /nvme/qa_test_models/autotest_model/log

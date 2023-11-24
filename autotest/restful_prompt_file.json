@@ -1,0 +1,175 @@
+[
+    {
+        "order": 1,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "你好，你叫什么名字",
+                "assert": {}
+            }
+        ]
+    },
+    {
+        "order": 2,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "成都的景点",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            "chengdu",
+                            "成都"
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            "熊猫",
+                            "panda"
+                        ]
+                    }
+                ]
+            },
+            {
+                "order": 2,
+                "prompt": "美食",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            "chengdu",
+                            "成都"
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            "火锅"
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "order": 3,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "美食",
+                "assert": [
+                    {
+                        "operator": "not_in",
+                        "value": [
+                            "chengdu",
+                            "成都"
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "order": 4,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "给我一首中文打油诗",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            "，"
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            "。"
+                        ]
+                    },
+                    {
+                        "operator": "len_g",
+                        "value": 10
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "order": 5,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "write a romantic poem",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            " "
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            ","
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            "."
+                        ]
+                    },
+                    {
+                        "operator": "in",
+                        "value": [
+                            "poem","love"
+                        ]
+                    },
+                    {
+                        "operator": "len_g",
+                        "value": 100
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "order": 6,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "给我几个适合聊天的emoji",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            "emoji",
+                            "👍"
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "order": 7,
+        "case": [
+            {
+                "order": 1,
+                "prompt": "請介紹香港維多利亞港",
+                "assert": [
+                    {
+                        "operator": "in",
+                        "value": [
+                            "香港維多利亞港"
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+]
