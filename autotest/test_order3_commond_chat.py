@@ -34,7 +34,7 @@ class Test_command_chat:
                                            None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.internlm_chat_7b
     @allure.story('internlm-chat-7b')
@@ -46,7 +46,7 @@ class Test_command_chat:
                                            None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.internlm_chat_20b
     @allure.story('internlm-chat-20b')
@@ -58,7 +58,7 @@ class Test_command_chat:
                                            None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.internlm_chat_20b
     @allure.story('internlm-chat-20b-inner-w4')
@@ -71,7 +71,7 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Qwen_7B_Chat
     @allure.story('Qwen-7B-Chat')
@@ -82,7 +82,7 @@ class Test_command_chat:
                                            'Qwen-7B-Chat', 'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Qwen_7B_Chat
     @allure.story('Qwen-7B-Chat-inner-w4')
@@ -94,7 +94,7 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Qwen_14B_Chat
     @allure.story('Qwen-14B-Chat')
@@ -105,7 +105,7 @@ class Test_command_chat:
                                            'Qwen-14B-Chat', 'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Qwen_14B_Chat_inner_w4
     @allure.story('Qwen-14B-Chat-inner-w4')
@@ -117,7 +117,7 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Baichuan2_7B_Chat
     @allure.story('Baichuan2-7B-Chat')
@@ -129,7 +129,7 @@ class Test_command_chat:
                                            None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Baichuan2_7B_Chat
     @allure.story('Baichuan2-7B-Chat-inner-w4')
@@ -142,7 +142,7 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.CodeLlama_7b_Instruct_hf
     @allure.story('CodeLlama-7b-Instruct-hf')
@@ -155,7 +155,7 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.CodeLlama_7b_Instruct_hf
     @allure.story('CodeLlama-7b-Instruct-hf-inner-w4')
@@ -167,7 +167,7 @@ class Test_command_chat:
             'CodeLlama-7b-Instruct-hf-inner-w4', 'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Llama_2_7b_chat_hf
     @allure.story('Llama-2-7b-chat-hf')
@@ -179,7 +179,7 @@ class Test_command_chat:
                                            None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result
 
     @pytest.mark.Llama_2_7b_chat_hf
     @allure.story('Llama-2-7b-chat-hf-inner-w4')
@@ -192,4 +192,4 @@ class Test_command_chat:
                                            'turbomind', None)
         allure.attach.file(chat_log,
                            attachment_type=allure.attachment_type.TEXT)
-        assert (result)
+        assert result

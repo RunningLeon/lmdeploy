@@ -28,7 +28,7 @@ def test_restful_internlm_chat_7b(config):
     allure.attach.file(restful_log,
                        attachment_type=allure.attachment_type.TEXT)
     allure.attach.file(kill_log, attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.smoke
@@ -48,7 +48,7 @@ def test_restful_Qwen_14B_Chat(config):
     allure.attach.file(restful_log,
                        attachment_type=allure.attachment_type.TEXT)
     allure.attach.file(kill_log, attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 def run_all_step(config, model, port):

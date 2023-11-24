@@ -17,7 +17,7 @@ def test_quantization_CodeLlama_7b_Instruct_hf(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.quantization
@@ -31,7 +31,7 @@ def test_quantization_Llama_2_7b_chat_hf(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.quantization
@@ -45,7 +45,7 @@ def test_quantization_internlm_chat_20b(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.quantization
@@ -59,15 +59,7 @@ def test_quantization_Qwen_14B_Chat(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    log_info = ''
-    with open(quantization_param_log, 'r') as f:
-        log_info += '\n=== quantization_param_log ===\n'
-        log_info += f.read()
-
-    with open(quantization_log, 'r') as f:
-        log_info += '\n=== quantization_log ===\n'
-        log_info += f.read()
-    assert result, log_info
+    assert result
 
 
 @pytest.mark.quantization
@@ -81,7 +73,7 @@ def test_quantization_Baichuan2_7B_Chat(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.quantization
@@ -95,7 +87,7 @@ def test_quantization_Qwen_7B_Chat(config):
     if quantization_log is not None:
         allure.attach.file(quantization_log,
                            attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 def quantization(config, w4_model_name, origin_model_name):
@@ -135,6 +127,7 @@ def quantization(config, w4_model_name, origin_model_name):
                                           text=True,
                                           encoding='utf-8')
             result = getParamsRes.returncode == 0
+
         if result is False:
             return result, quantization_param_log, None
 

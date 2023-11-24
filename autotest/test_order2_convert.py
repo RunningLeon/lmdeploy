@@ -12,7 +12,7 @@ def test_model_convert_llama2_chat_7b_w4(config):
     result, convert_log = convert(config, 'llama2-chat-7b-w4', 'llama2')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -23,7 +23,7 @@ def test_model_convert_internlm_chat_7b(config):
                                   'internlm-chat-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -34,7 +34,7 @@ def test_model_convert_internlm_chat_20b(config):
                                   'internlm-chat-20b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -45,7 +45,7 @@ def test_model_convert_internlm_chat_20b_inner_w4(config):
                                   'internlm-chat-20b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -55,7 +55,7 @@ def test_model_convert_Qwen_7B_Chat(config):
     result, convert_log = convert(config, 'Qwen-7B-Chat', 'qwen-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -65,7 +65,7 @@ def test_model_convert_Qwen_14B_Chat(config):
     result, convert_log = convert(config, 'Qwen-14B-Chat', 'qwen-14b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -75,7 +75,7 @@ def test_model_convert_Qwen_7B_Chat_inner_w4(config):
     result, convert_log = convert(config, 'Qwen-7B-Chat-inner-w4', 'qwen-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -85,7 +85,7 @@ def test_model_convert_Qwen_14B_Chat_inner_w4(config):
     result, convert_log = convert(config, 'Qwen-14B-Chat-inner-w4', 'qwen-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -95,7 +95,7 @@ def test_model_convert_Baichuan2_7B_Chat(config):
     result, convert_log = convert(config, 'Baichuan2-7B-Chat', 'baichuan2-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -106,7 +106,7 @@ def test_model_convert_Baichuan2_7B_Chat_inner_w4(config):
                                   'baichuan2-7b')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -117,7 +117,7 @@ def test_model_convert_CodeLlama_7b_Instruct_hf(config):
                                   'codellama')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -128,7 +128,7 @@ def test_model_convert_CodeLlama_7b_Instruct_hf_inner_w4(config):
                                   'codellama')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -138,7 +138,7 @@ def test_model_convert_Llama_2_7b_chat_hf(config):
     result, convert_log = convert(config, 'Llama-2-7b-chat-hf', 'llama2')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 @pytest.mark.convert
@@ -149,7 +149,7 @@ def test_model_convert_Llama_2_7b_chat_hf_inner_w4(config):
                                   'llama2')
     allure.attach.file(convert_log,
                        attachment_type=allure.attachment_type.TEXT)
-    assert (result)
+    assert result
 
 
 def convert(config, model_case, model_name):

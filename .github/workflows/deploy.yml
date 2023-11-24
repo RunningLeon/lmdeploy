@@ -14,7 +14,7 @@ on: [push, pull_request]
 #        default: false
 
 env:
-  PIP_CACHE_DIR: /nvme/github-actions/pip-cache
+  HOST_PIP_CACHE_DIR: /nvme/github-actions/pip-cache
 
 jobs:
   test_functions:
@@ -45,7 +45,7 @@ jobs:
           echo $(pwd)
           python3 -m pip cache dir
           python3 -m pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-          python3 -m pip install cmake packaging
+          python3 -m pip install cmake packaging protobuf transformers_stream_generator
       - name: Build lmdeploy
         run: |
           python3 -m pip install -r requirements/build.txt
@@ -71,7 +71,10 @@ jobs:
           # lmdeploy check_env
       - name: Test lmdeploy
         run: |
-          pytest autotest -m Qwen_7B_Chat --alluredir=allure-results --clean-alluredir
+          pytest autotest -m internlm_chat_7b --alluredir=allure-results --clean-alluredir
+      - name: Generate reports
+        if: always()
+        run: |
           export report_dir="$REPORT_DIR/$GITHUB_RUN_ID"
           echo "Save report to $report_dir"
           allure generate -c -o $report_dir
@@ -109,7 +112,7 @@ jobs:
             -v $(pwd)/../../:/__w \
             -v ${HF_MODEL}:/root/workspace/hf_model \
             -v ${WORKDIR}:/root/workspace/workdir \
-            -v ${PIP_CACHE_DIR}:/root/.cache/pip \
+            -v ${HOST_PIP_CACHE_DIR}:/root/.cache/pip \
             openmmlab/lmdeploy:latest tail -f /dev/null \
              )
           docker start $CONTAINER_ID
