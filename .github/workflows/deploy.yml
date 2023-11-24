@@ -16,6 +16,8 @@ on: [push, pull_request]
 env:
   HOST_PIP_CACHE_DIR: /nvme/github-actions/pip-cache
   HOST_LOCALTIME: /usr/share/zoneinfo/Asia/Shanghai
+
+
 jobs:
   test_functions:
     # if: startsWith(github.ref, 'refs/tags/') == true
@@ -84,7 +86,11 @@ jobs:
       - name: Clear workfile
         if: always()
         run: |
-          rm -rf .git ./*
+          export workdir=$(pwd)
+          cd ..
+          rm -rf $workdir
+          mkdir $workdir
+          chmod -R 777 $workdir
 
   test_triton:
     # if: startsWith(github.ref, 'refs/tags/') == true
@@ -181,6 +187,9 @@ jobs:
       - name: Clear workfile
         if: always()
         run: |
-          docker exec $CONTAINER_ID rm -rf /root/workspace/workdir/${TB_MODEL}
-          docker exec --workdir /__w/lmdeploy/lmdeploy $CONTAINER_ID rm -rf .git ./*
+          export workdir=$(pwd)
+          docker exec --workdir /__w/lmdeploy $CONTAINER_ID rm -rf lmdeploy
+          mkdir $workdir
+          chmod -R 777 $workdir
+          docker exec --workdir /__w/lmdeploy $CONTAINER_ID rm -rf /root/workspace/workdir/${TB_MODEL}
           docker stop $CONTAINER_ID
