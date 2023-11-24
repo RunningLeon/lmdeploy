@@ -100,7 +100,7 @@ def startRestfulApi(config, model, port):
                        stderr=f,
                        shell=True,
                        text=True,
-                       encoding=True)
+                       encoding='utf-8')
         f.writelines('commondLine: ' + ' '.join(cmd) + '\n')
 
         # convert
@@ -109,7 +109,7 @@ def startRestfulApi(config, model, port):
                                       stderr=f,
                                       shell=True,
                                       text=True,
-                                      encoding=True)
+                                      encoding='utf-8')
         pid = convertRes.pid
 
     return start_log, pid
@@ -127,7 +127,7 @@ def killByPid(config, model, pid):
                        stderr=f,
                        shell=True,
                        text=True,
-                       encoding=True)
+                       encoding='utf-8')
         f.writelines('commondLine: ' + ' '.join(cmd) + '\n')
 
         # convert
@@ -136,7 +136,7 @@ def killByPid(config, model, pid):
                                     stderr=f,
                                     shell=True,
                                     text=True,
-                                    encoding=True)
+                                    encoding='utf-8')
 
         # 命令校验
         success = convertRes.returncode == 0

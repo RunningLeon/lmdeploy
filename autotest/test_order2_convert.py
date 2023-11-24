@@ -176,7 +176,7 @@ def convert(config, model_case, model_name):
                        stderr=f,
                        shell=True,
                        text=True,
-                       encoding=True)
+                       encoding='utf-8')
         f.writelines('commondLine: ' + ' '.join(cmd) + '\n')
         # convert
         convertRes = subprocess.run(cmd,
@@ -184,7 +184,7 @@ def convert(config, model_case, model_name):
                                     stderr=f,
                                     shell=True,
                                     text=True,
-                                    encoding=True)
+                                    encoding='utf-8')
         # check result
         result = convertRes.returncode == 0
 

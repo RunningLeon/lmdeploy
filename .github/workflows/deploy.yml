@@ -44,24 +44,18 @@ jobs:
           python3 -m pip cache dir
           python3 -m pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
           python3 -m pip install cmake packaging
-      - name: Install lmdeploy from pypi
-        if: startsWith(github.ref, 'refs/tags/') == true
+      - name: Build lmdeploy
         run: |
-          python3 -m pip install lmdeploy[all]
-          python3 -m pip install -r requirements/test.txt
-          lmdeploy check_env
-      - name: Install lmdeploy from source
-        if: startsWith(github.ref, 'refs/tags/') != true
-        run: |
-          python3 -m pip install flash-attn --no-build-isolation
-          python3 -m pip install -r requirements.txt -r requirements/test.txt
-          mkdir build
+          # use cached build
+          cp -r ../../build build
           cd build
           bash ../generate.sh
           make -j$(nproc) && make install
-          cd ..
+      - name: Install lmdeploy from source
+        run: |
+          python3 -m pip install -r requirements.txt -r requirements/test.txt
           python3 -m pip install .
-          lmdeploy check_env
+          # lmdeploy check_env
       - name: Test lmdeploy
         run: |
           pytest autotest -m Qwen_7B_Chat --alluredir=allure-results --clean-alluredir

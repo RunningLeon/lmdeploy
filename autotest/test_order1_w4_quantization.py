@@ -116,7 +116,7 @@ def quantization(config, w4_model_name, origin_model_name):
                            stderr=f,
                            shell=True,
                            text=True,
-                           encoding=True)
+                           encoding='utf-8')
             f.writelines('commondLine get_param_cmd: ' +
                          ' '.join(get_param_cmd) + '\n')
             # get params
@@ -125,7 +125,7 @@ def quantization(config, w4_model_name, origin_model_name):
                                           stderr=f,
                                           shell=True,
                                           text=True,
-                                          encoding=True)
+                                          encoding='utf-8')
             result = getParamsRes.returncode == 0
         if result is False:
             return result, quantization_param_log, None
@@ -137,7 +137,7 @@ def quantization(config, w4_model_name, origin_model_name):
                            stderr=f,
                            shell=True,
                            text=True,
-                           encoding=True)
+                           encoding='utf-8')
             f.writelines('commondLine quantization_cmd: ' +
                          ' '.join(quantization_cmd) + '\n')
             # convert
@@ -146,7 +146,7 @@ def quantization(config, w4_model_name, origin_model_name):
                                              stderr=f,
                                              shell=True,
                                              text=True,
-                                             encoding=True)
+                                             encoding='utf-8')
             # 命令校验
             result = quantizationRes.returncode == 0
 
