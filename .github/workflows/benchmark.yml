@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 4320 # 72hours
     environment: 'prod'
     env:
-      REPORT_DIR: /nvme/github-actions/perform-reports
+      REPORT_DIR: /root/perform-reports
       TB_MODEL: /nvme/qa_test_models/perform-workspace/tb
       MODELS_ROOT: /nvme/qa_test_models
     container:
@@ -38,6 +38,7 @@ jobs:
         - /nvme/github-actions/pip-cache:/root/.cache/pip
         - /nvme/github-actions/packages:/root/packages
         - /nvme/github-actions/resources:/root/resources
+        - /nvme/github-actions/perform-reports:/root/perform-reports
         - /nvme/qa_test_models:/nvme/qa_test_models
         - /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime:ro
     steps:
