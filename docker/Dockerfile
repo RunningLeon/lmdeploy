@@ -9,11 +9,12 @@ RUN python3 -m pip install --no-cache-dir cmake packaging
 
 ENV NCCL_LAUNCH_MODE=GROUP
 
-ARG VERSION=main
+# Should in the lmdeploy root directory when building docker image
+COPY . /opt/lmdeploy
 
-RUN git clone --depth=1 --branch=${VERSION} https://github.com/InternLM/lmdeploy.git &&\
-    cd lmdeploy &&\
-    python3 -m pip install --no-cache-dir -r requirements.txt &&\
+WORKDIR /opt/lmdeploy
+
+RUN python3 -m pip install --no-cache-dir -r requirements.txt &&\
     mkdir -p build && cd build &&\
     cmake .. \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -27,7 +28,7 @@ RUN git clone --depth=1 --branch=${VERSION} https://github.com/InternLM/lmdeploy
         -DUSE_NVTX=ON &&\
     make -j$(nproc) && make install &&\
     cd .. &&\
-    python3 -m pip install . &&\
+    python3 -m pip install --user . &&\
     rm -rf build
 
 ENV LD_LIBRARY_PATH=/opt/tritonserver/lib:$LD_LIBRARY_PATH

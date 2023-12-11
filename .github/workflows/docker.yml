@@ -14,6 +14,18 @@ on:
       - main
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      repo_ref:
+        required: true
+        description: 'Set branch or tag or commit id. Default is ""'
+        type: string
+        default: ''
+      image_tag:
+        required: true
+        description: 'Set docker image tag. Default is "latest"'
+        type: string
+        default: latest
 
 jobs:
   publish_docker_image:
@@ -21,9 +33,12 @@ jobs:
     environment: 'prod'
     env:
       TAG_PREFIX: "openmmlab/lmdeploy"
+      REPO_REF: ""
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+        with:
+          ref: ${{github.event.inputs.repo_ref}}
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -44,7 +59,16 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push the Docker image manually
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          export TAG=$TAG_PREFIX:${{github.event.inputs.image_tag}}
+          echo $TAG
+          docker build docker/ -t ${TAG} --no-cache
+          docker push $TAG
+          echo "TAG=${TAG}" >> $GITHUB_ENV
       - name: Build and push the latest Docker image
+        if: github.event_name != 'workflow_dispatch'
         run: |
           export TAG=$TAG_PREFIX:latest
           echo $TAG
