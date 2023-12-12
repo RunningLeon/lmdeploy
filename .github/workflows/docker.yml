@@ -40,18 +40,6 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: ${{github.event.inputs.repo_ref}}
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          # This might remove tools that are actually needed, if set to "true" but frees about 6 GB
-          tool-cache: false
-          docker-images: false
-          # All of these default to true, but feel free to set to "false" if necessary for your workflow
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: false
       - name: Get docker info
         run: |
           docker info
@@ -65,18 +53,16 @@ jobs:
       - name: Update docker TAG from workflow input
         if: github.event_name == 'workflow_dispatch'
         run: |
+          echo $TAG
           export TAG=$TAG_PREFIX:${{github.event.inputs.image_tag}}
           echo $TAG
           echo "TAG=${TAG}" >> $GITHUB_ENV
       - name: Build and push Docker image
         run: |
           echo $TAG
-          docker build . -f docker/Dockerfile -t ${TAG} --no-cache
-          docker push $TAG
       - name: Push docker image with released tag
         if: startsWith(github.ref, 'refs/tags/') == true
         run: |
+          echo $TAG
           export RELEASE_TAG=${TAG_PREFIX}:${{github.ref_name}}
           echo $RELEASE_TAG
-          docker tag $TAG $RELEASE_TAG
-          docker push $RELEASE_TAG
