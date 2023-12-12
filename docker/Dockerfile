@@ -14,7 +14,8 @@ COPY . /opt/lmdeploy
 
 WORKDIR /opt/lmdeploy
 
-RUN python3 -m pip install --no-cache-dir -r requirements.txt &&\
+RUN cd /opt/lmdeploy &&\
+    python3 -m pip install --no-cache-dir -r requirements.txt &&\
     mkdir -p build && cd build &&\
     cmake .. \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
