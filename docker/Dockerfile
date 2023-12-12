@@ -9,7 +9,7 @@ RUN python3 -m pip install --no-cache-dir cmake packaging
 
 ENV NCCL_LAUNCH_MODE=GROUP
 
-# Should in the lmdeploy root directory when building docker image
+# Should be in the lmdeploy root directory when building docker image
 COPY . /opt/lmdeploy
 
 WORKDIR /opt/lmdeploy
@@ -29,7 +29,7 @@ RUN cd /opt/lmdeploy &&\
         -DUSE_NVTX=ON &&\
     make -j$(nproc) && make install &&\
     cd .. &&\
-    python3 -m pip install --user . &&\
+    python3 -m pip install . &&\
     rm -rf build
 
 ENV LD_LIBRARY_PATH=/opt/tritonserver/lib:$LD_LIBRARY_PATH
