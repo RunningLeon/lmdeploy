@@ -64,7 +64,7 @@ jobs:
         run: |
           export TAG=$TAG_PREFIX:${{github.event.inputs.image_tag}}
           echo $TAG
-          docker build docker/ -t ${TAG} --no-cache
+          docker build . -f docker/Dockerfile -t ${TAG} --no-cache
           docker push $TAG
           echo "TAG=${TAG}" >> $GITHUB_ENV
       - name: Build and push the latest Docker image
@@ -72,7 +72,7 @@ jobs:
         run: |
           export TAG=$TAG_PREFIX:latest
           echo $TAG
-          docker build docker/ -t ${TAG} --no-cache
+          docker build . -f docker/Dockerfile -t ${TAG} --no-cache
           docker push $TAG
           echo "TAG=${TAG}" >> $GITHUB_ENV
       - name: Push docker image with released tag
