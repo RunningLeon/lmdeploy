@@ -130,7 +130,7 @@ jobs:
         run: |
           export CONTAINER_ID=$(docker create \
             --rm \
-            --gpus='"device=0,1"' \
+            --gpus='"device=4,5"' \
             --shm-size 16g \
             --cap-add=SYS_PTRACE \
             --cap-add=SYS_ADMIN \
