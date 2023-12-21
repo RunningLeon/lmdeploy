@@ -199,7 +199,7 @@ jobs:
         run: |
           docker exec --detach $CONTAINER_ID bash -c \
             "tritonserver \
-            --model-repository=/nvme/qa_test_models/triton_workspace/tb/model_repository \
+            --model-repository=/root/workspace/workdir/${TB_MODEL}/model_repository \
             --allow-http=0 \
             --allow-grpc=1 \
             --grpc-port=${GRPC_PORT} \
@@ -209,7 +209,7 @@ jobs:
           sleep 180s
           # print triton server log file
           cat run.log
-          python3 -c 'import os; assert not os.path.exists("finish.txt")'
+          python3 -c 'import os; assert not os.path.exists("finish.txt"), "Failed to start tritonserver"'
       - name: Test triton server
         run: |
           docker exec \
