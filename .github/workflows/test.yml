@@ -153,10 +153,10 @@ jobs:
         run: |
           docker exec $CONTAINER_ID mkdir build
           docker exec --workdir /__w/lmdeploy/lmdeploy/build \
-            --env http_proxy=${{secrets.PROXY}} \
-            --env https_proxy=${{secrets.PROXY}} \
-            --env HTTP_PROXY=${{secrets.PROXY}} \
-            --env HTTPS_PROXY=${{secrets.PROXY}} \
+            --env http_proxy=${{ env.http_proxy }} \
+            --env https_proxy=${{ env.http_proxy }} \
+            --env HTTP_PROXY=${{ env.http_proxy }} \
+            --env HTTPS_PROXY=${{ env.http_proxy }} \
             $CONTAINER_ID  cmake .. \
                -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
@@ -173,18 +173,18 @@ jobs:
       - name: Install lmdeploy
         run: |
           docker exec \
-            --env http_proxy=${{secrets.PROXY}} \
-            --env https_proxy=${{secrets.PROXY}} \
+            --env http_proxy=${{ env.http_proxy }} \
+            --env https_proxy=${{ env.http_proxy }} \
             $CONTAINER_ID python3 -m pip install tritonclient[grpc] protobuf
 
           docker exec \
-            --env http_proxy=${{secrets.PROXY}} \
-            --env https_proxy=${{secrets.PROXY}} \
+            --env http_proxy=${{ env.http_proxy }} \
+            --env https_proxy=${{ env.http_proxy }} \
             $CONTAINER_ID python3 -m pip install -r requirements/test.txt
 
           docker exec \
-            --env http_proxy=${{secrets.PROXY}} \
-            --env https_proxy=${{secrets.PROXY}} \
+            --env http_proxy=${{ env.http_proxy }} \
+            --env https_proxy=${{ env.http_proxy }} \
             $CONTAINER_ID python3 -m pip install .
 
           docker exec $CONTAINER_ID lmdeploy check_env
