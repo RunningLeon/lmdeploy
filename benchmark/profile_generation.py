@@ -15,9 +15,12 @@ from pynvml import (NVMLError, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
                     nvmlInit, nvmlShutdown, nvmlSystemGetDriverVersion)
 from tqdm import tqdm
 
+from lmdeploy.cli.utils import ArgumentHelper, DefaultsAndTypesHelpFormatter
+from lmdeploy.messages import EngineGenerationConfig
+
 
 def infer(model, session_id: int, input_ids: List, output_seqlen: int,
-          gen_config, test_round: int, que: Queue):
+          gen_config: EngineGenerationConfig, test_round: int, que: Queue):
     if session_id == 1:
         pbar = tqdm(total=test_round)
     chatbot = model.create_instance()
@@ -66,7 +69,7 @@ def infer(model, session_id: int, input_ids: List, output_seqlen: int,
 
 
 def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
-           warmup_round: int, gen_config):
+           warmup_round: int, gen_config: EngineGenerationConfig):
     if not warmup_round:
         return
 
@@ -82,10 +85,10 @@ def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
                                           sequence_end=True,
                                           ignore_eos=True,
                                           gen_config=gen_config):
-
-                # for pytorch engine to restart a session
-                if hasattr(chatbot, 'end'):
-                    chatbot.end(session_id)
+                continue
+            # for pytorch engine to restart a session
+            if hasattr(chatbot, 'end'):
+                chatbot.end(session_id)
 
     _start = time.perf_counter()
     procs = []
@@ -110,8 +113,7 @@ def profile_throughput(model_path: str, backend: str, concurrency: int,
           f'n_prompt_token: {input_seqlen}, '
           f'n_completion_token: {output_seqlen}, '
           f'test_round: {test_round}, warmup_round: {warmup_round}')
-    from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
-                                   TurbomindEngineConfig)
+    from lmdeploy.messages import PytorchEngineConfig, TurbomindEngineConfig
     if backend == 'turbomind':
         from lmdeploy.turbomind import TurboMind
 
@@ -285,8 +287,6 @@ class ProfileResult:
 
 
 def parse_args():
-    from lmdeploy.cli.utils import (ArgumentHelper,
-                                    DefaultsAndTypesHelpFormatter)
     parser = argparse.ArgumentParser(
         description='Profile the token generation performance with'
         ' pytorch or turbomind engine',
