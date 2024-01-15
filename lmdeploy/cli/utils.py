@@ -131,7 +131,8 @@ class ArgumentHelper:
 
     @staticmethod
     def temperature(parser):
-        return parser.add_argument('--temperature',
+        return parser.add_argument('-temp',
+                                   '--temperature',
                                    type=float,
                                    default=0.8,
                                    help='Sampling temperature')

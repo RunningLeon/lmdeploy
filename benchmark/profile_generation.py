@@ -295,19 +295,22 @@ def parse_args():
                         type=str,
                         help='the path of the model in localhost or '
                         'the repo_id of the model in huggingface.co')
-    parser.add_argument('--concurrency',
+    parser.add_argument('-c',
+                        '--concurrency',
                         nargs='+',
                         type=int,
                         help='how many requests launched concurrently',
                         default=[1, 16, 32, 64])
     parser.add_argument(
+        '-pt',
         '--prompt-tokens',
         nargs='+',
         type=int,
         help='how many requests launched concurrently. One-to-one '
         'correspondence with completion-tokens',
         default=[1, 128, 128, 2048, 2048])
-    parser.add_argument('--completion-tokens',
+    parser.add_argument('-ct',
+                        '--completion-tokens',
                         nargs='+',
                         type=int,
                         help='how many tokens to be generated. One-to-one'
@@ -317,11 +320,13 @@ def parse_args():
                         type=str,
                         help='Where to save the result.',
                         default='profile_generation.csv')
-    parser.add_argument('--test-round',
+    parser.add_argument('-tr',
+                        '--test-round',
                         type=int,
                         help='number of test rounds',
                         default=6)
-    parser.add_argument('--warmup-round',
+    parser.add_argument('-w',
+                        '--warmup-round',
                         type=int,
                         help='number of warmup rounds',
                         default=1)
