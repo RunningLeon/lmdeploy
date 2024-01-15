@@ -115,12 +115,13 @@ def profile_throughput(model_path: str, backend: str, concurrency: int,
     if backend == 'turbomind':
         from lmdeploy.turbomind import TurboMind
 
-        engine_config = TurbomindEngineConfig(tp=tp)
-        tm_model = TurboMind(model_path, engine_config=engine_config)
+        engine_config = TurbomindEngineConfig(model_name='llama', tp=tp)
+        tm_model = TurboMind.from_pretrained(model_path,
+                                             engine_config=engine_config)
     elif backend == 'pytorch':
         from lmdeploy.pytorch.engine import Engine
 
-        engine_config = PytorchEngineConfig(tp=tp)
+        engine_config = PytorchEngineConfig(model_name='llama', tp=tp)
         tm_model = Engine(model_path, engine_config)
 
     gen_config = EngineGenerationConfig(top_k=top_k,
