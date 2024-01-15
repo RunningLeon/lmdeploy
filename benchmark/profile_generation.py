@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from queue import Queue
 from threading import Thread
-from typing import List, Union
+from typing import List
 
 import numpy as np
 from pynvml import (NVMLError, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
@@ -15,12 +15,9 @@ from pynvml import (NVMLError, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
                     nvmlInit, nvmlShutdown, nvmlSystemGetDriverVersion)
 from tqdm import tqdm
 
-from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
-                               TurbomindEngineConfig)
-
 
 def infer(model, session_id: int, input_ids: List, output_seqlen: int,
-          gen_config: EngineGenerationConfig, test_round: int, que: Queue):
+          gen_config, test_round: int, que: Queue):
     if session_id == 1:
         pbar = tqdm(total=test_round)
     chatbot = model.create_instance()
@@ -69,7 +66,7 @@ def infer(model, session_id: int, input_ids: List, output_seqlen: int,
 
 
 def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
-           warmup_round: int, gen_config: EngineGenerationConfig):
+           warmup_round: int, gen_config):
     if not warmup_round:
         return
 
@@ -104,26 +101,33 @@ def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
     print(f'end warmup, elapsed time: {round(_end - _start, 2)}s')
 
 
-def profile_throughput(model_path: str, concurrency: int, input_seqlen: int,
-                       output_seqlen: int,
-                       engine_config: Union[PytorchEngineConfig,
-                                            TurbomindEngineConfig],
-                       gen_config: EngineGenerationConfig, test_round: int,
-                       warmup_round: int):
+def profile_throughput(model_path: str, backend: str, concurrency: int,
+                       input_seqlen: int, output_seqlen: int, tp: int,
+                       top_k: int, top_p: int, temperature: float,
+                       test_round: int, warmup_round: int, **kwargs):
 
     print(f'profiling ... concurrency: {concurrency}, '
           f'n_prompt_token: {input_seqlen}, '
           f'n_completion_token: {output_seqlen}, '
           f'test_round: {test_round}, warmup_round: {warmup_round}')
-    # avoid turbomind checking chat template name by setting `model_name='llama'` # noqa
-
-    if isinstance(engine_config, TurbomindEngineConfig):
+    from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
+                                   TurbomindEngineConfig)
+    if backend == 'turbomind':
         from lmdeploy.turbomind import TurboMind
+
+        engine_config = TurbomindEngineConfig(tp=tp)
         tm_model = TurboMind(model_path, engine_config=engine_config)
-    elif isinstance(engine_config, PytorchEngineConfig):
+    elif backend == 'pytorch':
         from lmdeploy.pytorch.engine import Engine
+
+        engine_config = PytorchEngineConfig(tp=tp)
         tm_model = Engine(model_path, engine_config)
 
+    gen_config = EngineGenerationConfig(top_k=top_k,
+                                        top_p=top_p,
+                                        temperature=temperature,
+                                        max_new_tokens=output_seqlen,
+                                        ignore_eos=True)
     # make up a dummy `input_ids` with the length of `input_seqlen` exactly
     assert input_seqlen > 0, 'input_seqlen should > 0'
     input_ids = np.random.randint(low=0, high=101, size=input_seqlen).tolist()
@@ -346,24 +350,15 @@ def main():
             MemoryMonitor.start()
             from functools import partial
             from multiprocessing import Pool
-            if args.backend == 'turbomind':
-                engine_config = TurbomindEngineConfig(model_name='llama',
-                                                      tp=args.tp)
-            elif args.backend == 'pytorch':
-                engine_config = PytorchEngineConfig(model_name='llama',
-                                                    tp=args.tp)
-            gen_config = EngineGenerationConfig(
-                top_k=args.top_k,
-                top_p=args.top_p,
-                temperature=args.temperature,
-                max_new_tokens=completion_tokens,
-                ignore_eos=True)
             profile_target = partial(profile_throughput,
+                                     backend=args.backend,
                                      concurrency=batch,
                                      input_seqlen=prompt_tokens,
                                      output_seqlen=completion_tokens,
-                                     engine_config=engine_config,
-                                     gen_config=gen_config,
+                                     tp=args.tp,
+                                     top_k=args.top_k,
+                                     top_p=args.top_p,
+                                     temperature=args.temperature,
                                      test_round=args.test_round,
                                      warmup_round=args.warmup_round)
             output = Pool(1).map(profile_target, (args.model_path, ))
