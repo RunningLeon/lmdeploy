@@ -15,6 +15,7 @@ from pynvml import (NVMLError, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
                     nvmlInit, nvmlShutdown, nvmlSystemGetDriverVersion)
 from tqdm import tqdm
 
+from lmdeploy.cli.utils import ArgumentHelper, DefaultsAndTypesHelpFormatter
 from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
                                TurbomindEngineConfig)
 
@@ -85,10 +86,10 @@ def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
                                           sequence_end=True,
                                           ignore_eos=True,
                                           gen_config=gen_config):
-
-                # for pytorch engine to restart a session
-                if hasattr(chatbot, 'end'):
-                    chatbot.end(session_id)
+                continue
+            # for pytorch engine to restart a session
+            if hasattr(chatbot, 'end'):
+                chatbot.end(session_id)
 
     _start = time.perf_counter()
     procs = []
@@ -115,11 +116,10 @@ def profile_throughput(model_path: str, concurrency: int, input_seqlen: int,
           f'n_prompt_token: {input_seqlen}, '
           f'n_completion_token: {output_seqlen}, '
           f'test_round: {test_round}, warmup_round: {warmup_round}')
-    # avoid turbomind checking chat template name by setting `model_name='llama'` # noqa
-
     if isinstance(engine_config, TurbomindEngineConfig):
         from lmdeploy.turbomind import TurboMind
-        tm_model = TurboMind(model_path, engine_config=engine_config)
+        tm_model = TurboMind.from_pretrained(model_path,
+                                             engine_config=engine_config)
     elif isinstance(engine_config, PytorchEngineConfig):
         from lmdeploy.pytorch.engine import Engine
         tm_model = Engine(model_path, engine_config)
@@ -280,8 +280,6 @@ class ProfileResult:
 
 
 def parse_args():
-    from lmdeploy.cli.utils import (ArgumentHelper,
-                                    DefaultsAndTypesHelpFormatter)
     parser = argparse.ArgumentParser(
         description='Profile the token generation performance with'
         ' pytorch or turbomind engine',
