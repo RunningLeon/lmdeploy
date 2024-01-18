@@ -266,15 +266,23 @@ def parse_args():
                         default=0,
                         help='Seed used in sampling prompts from dataset')
     # other args
-    ArgumentHelper.tp(parser)
     ArgumentHelper.top_p(parser)
     ArgumentHelper.temperature(parser)
     ArgumentHelper.top_k(parser)
     ArgumentHelper.log_level(parser)
     ArgumentHelper.backend(parser)
-    ArgumentHelper.cache_max_entry_count(parser)
-    ArgumentHelper.model_format(parser, default='hf')
-    ArgumentHelper.session_len(parser, default=4096)
+
+    # pytorch engine args
+    pt_group = parser.add_argument_group('PyTorch engine arguments')
+    tp_act = ArgumentHelper.tp(pt_group)
+    model_format_act = ArgumentHelper.model_format(pt_group, default='hf')
+    session_len_act = ArgumentHelper.session_len(parser, default=4096)
+    # turbomind engine args
+    tb_group = parser.add_argument_group('TurboMind engine argument')
+    tb_group._group_actions.append(tp_act)
+    tb_group._group_actions.append(model_format_act)
+    tb_group._group_actions.append(session_len_act)
+    ArgumentHelper.cache_max_entry_count(tb_group)
     args = parser.parse_args()
     return args
 

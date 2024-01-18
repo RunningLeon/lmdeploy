@@ -324,14 +324,20 @@ def parse_args():
                         help='number of warmup rounds',
                         default=1)
     # other args
-    ArgumentHelper.tp(parser)
     ArgumentHelper.top_p(parser)
     ArgumentHelper.temperature(parser)
     ArgumentHelper.top_k(parser)
     ArgumentHelper.log_level(parser)
     ArgumentHelper.backend(parser)
-    ArgumentHelper.model_format(parser, default='hf')
-    ArgumentHelper.cache_max_entry_count(parser)
+    # pytorch engine args
+    pt_group = parser.add_argument_group('PyTorch engine arguments')
+    tp_act = ArgumentHelper.tp(pt_group)
+    model_format_act = ArgumentHelper.model_format(pt_group, default='hf')
+    # turbomind engine args
+    tb_group = parser.add_argument_group('TurboMind engine argument')
+    tb_group._group_actions.append(tp_act)
+    tb_group._group_actions.append(model_format_act)
+    ArgumentHelper.cache_max_entry_count(tb_group)
     args = parser.parse_args()
     return args
 
