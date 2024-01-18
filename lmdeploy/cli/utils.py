@@ -70,10 +70,10 @@ class ArgumentHelper:
                                    help='The identical id of a session')
 
     @staticmethod
-    def session_len(parser):
+    def session_len(parser, default: int = None):
         return parser.add_argument('--session-len',
                                    type=int,
-                                   default=None,
+                                   default=default,
                                    help='The max session length of a sequence')
 
     @staticmethod

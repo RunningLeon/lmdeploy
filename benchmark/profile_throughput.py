@@ -63,7 +63,7 @@ class Engine:
 
     def __init__(self, model_path: str,
                  engine_config: Union[PytorchEngineConfig,
-                                      TurbomindEngineConfig], csv_file: str):
+                                      TurbomindEngineConfig], csv: str):
         if isinstance(engine_config, TurbomindEngineConfig):
             from lmdeploy.turbomind import TurboMind
             tm_model = TurboMind.from_pretrained(model_path,
@@ -75,7 +75,7 @@ class Engine:
         self.tm_model = tm_model
         self.tokenizer = tm_model.tokenizer
 
-        self.csv = csv_file
+        self.csv = csv
         self.pbar = None
 
     def _inference(self, req_queue: Queue, res_queue: Queue, session_id: int,
@@ -274,6 +274,7 @@ def parse_args():
     ArgumentHelper.backend(parser)
     ArgumentHelper.cache_max_entry_count(parser)
     ArgumentHelper.model_format(parser, default='hf')
+    ArgumentHelper.session_len(parser, default=4096)
     args = parser.parse_args()
     return args
 
@@ -283,15 +284,19 @@ def main():
     random.seed(args.seed)
     os.environ['TM_LOG_LEVEL'] = args.log_level
     if args.backend == 'turbomind':
-        engine_config = TurbomindEngineConfig(model_name='llama', tp=args.tp)
+        engine_config = TurbomindEngineConfig(model_name='llama',
+                                              session_len=args.session_len,
+                                              tp=args.tp)
     elif args.backend == 'pytorch':
-        engine_config = PytorchEngineConfig(model_name='llama', tp=args.tp)
+        engine_config = PytorchEngineConfig(model_name='llama',
+                                            session_len=args.session_len,
+                                            tp=args.tp)
 
     gen_config = EngineGenerationConfig(top_k=args.top_k,
                                         top_p=args.top_p,
                                         temperature=args.temperature,
                                         ignore_eos=True)
-    engine = Engine(args.model_path, engine_config, csv_file=args.csv)
+    engine = Engine(args.model_path, engine_config, csv=args.csv)
 
     requests = sample_requests(args.dataset, args.num_prompts,
                                engine.tokenizer)
