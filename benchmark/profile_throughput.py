@@ -66,7 +66,8 @@ class Engine:
                                       TurbomindEngineConfig], csv_file: str):
         if isinstance(engine_config, TurbomindEngineConfig):
             from lmdeploy.turbomind import TurboMind
-            tm_model = TurboMind(model_path, engine_config=engine_config)
+            tm_model = TurboMind.from_pretrained(model_path,
+                                                 engine_config=engine_config)
         elif isinstance(engine_config, PytorchEngineConfig):
             from lmdeploy.pytorch.engine import Engine as PytorchEngine
             tm_model = PytorchEngine(model_path, engine_config=engine_config)
