@@ -317,7 +317,7 @@ def parse_args():
                         '--test-round',
                         type=int,
                         help='number of test rounds',
-                        default=6)
+                        default=3)
     parser.add_argument('-w',
                         '--warmup-round',
                         type=int,
@@ -330,7 +330,8 @@ def parse_args():
     ArgumentHelper.top_k(parser)
     ArgumentHelper.log_level(parser)
     ArgumentHelper.backend(parser)
-    ArgumentHelper.model_format(parser)
+    ArgumentHelper.model_format(parser, default='hf')
+    ArgumentHelper.cache_max_entry_count(parser)
     args = parser.parse_args()
     return args
 
@@ -351,8 +352,11 @@ def main():
             from functools import partial
             from multiprocessing import Pool
             if args.backend == 'turbomind':
-                engine_config = TurbomindEngineConfig(model_name='llama',
-                                                      tp=args.tp)
+                engine_config = TurbomindEngineConfig(
+                    model_name='llama',
+                    cache_max_entry_count=args.cache_max_entry_count,
+                    model_format=args.model_format,
+                    tp=args.tp)
             elif args.backend == 'pytorch':
                 engine_config = PytorchEngineConfig(model_name='llama',
                                                     tp=args.tp)
@@ -362,14 +366,16 @@ def main():
                 temperature=args.temperature,
                 max_new_tokens=completion_tokens,
                 ignore_eos=True)
-            profile_target = partial(profile_throughput,
-                                     concurrency=batch,
-                                     input_seqlen=prompt_tokens,
-                                     output_seqlen=completion_tokens,
-                                     engine_config=engine_config,
-                                     gen_config=gen_config,
-                                     test_round=args.test_round,
-                                     warmup_round=args.warmup_round)
+            profile_target = partial(
+                profile_throughput,
+                concurrency=batch,
+                input_seqlen=prompt_tokens,
+                output_seqlen=completion_tokens,
+                engine_config=engine_config,
+                gen_config=gen_config,
+                test_round=args.test_round,
+                warmup_round=args.warmup_round,
+            )
             output = Pool(1).map(profile_target, (args.model_path, ))
             model_name, first_token_latency, percentiles, \
                 throughput_per_proc, tp = output[0]

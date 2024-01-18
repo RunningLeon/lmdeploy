@@ -251,12 +251,12 @@ def parse_args():
         '--concurrency',
         type=int,
         help='Number of working threads to process the sampled prompts',
-        default=64)
+        default=256)
     parser.add_argument('-n',
                         '--num-prompts',
                         type=int,
                         help='Number of prompts to process',
-                        default=2000)
+                        default=5000)
     parser.add_argument('--csv',
                         type=str,
                         help='Where to save the result.',
@@ -272,6 +272,8 @@ def parse_args():
     ArgumentHelper.top_k(parser)
     ArgumentHelper.log_level(parser)
     ArgumentHelper.backend(parser)
+    ArgumentHelper.cache_max_entry_count(parser)
+    ArgumentHelper.model_format(parser, default='hf')
     args = parser.parse_args()
     return args
 

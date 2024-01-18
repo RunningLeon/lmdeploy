@@ -45,11 +45,11 @@ class ArgumentHelper:
             'model names')
 
     @staticmethod
-    def model_format(parser):
+    def model_format(parser, default: str = None):
         return parser.add_argument(
             '--model-format',
             type=str,
-            default=None,
+            default=default,
             choices=['hf', 'llama', 'awq'],
             help='The format of input model. `hf` meaning `hf_llama`, `llama` '
             'meaning `meta_llama`, `awq` meaning the quantized model by awq')
