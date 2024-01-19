@@ -92,12 +92,11 @@ class Engine:
             n_prev_token = 0
 
             input_ids = self.tokenizer(prompt).input_ids
-            gen_config.max_new_tokens = output_seqlen,
+            gen_config.max_new_tokens = output_seqlen
             for outputs in model_inst.stream_infer(
                     session_id,
                     input_ids=input_ids,
                     gen_config=gen_config,
-                    request_output_len=output_seqlen,
                     sequence_start=True,
                     sequence_end=True,
                     stream_output=stream_output):

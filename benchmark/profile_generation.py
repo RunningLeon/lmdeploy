@@ -20,11 +20,12 @@ from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
                                TurbomindEngineConfig)
 
 
-def infer(model, session_id: int, input_ids: List, output_seqlen: int,
+def infer(model, session_id: int, input_ids: List,
           gen_config: EngineGenerationConfig, test_round: int, que: Queue):
     if session_id == 1:
         pbar = tqdm(total=test_round)
     chatbot = model.create_instance()
+    output_seqlen = gen_config.max_new_tokens
     stats = []
     for _ in range(test_round):
         token_latency_stats = [0] * (output_seqlen + 1)
@@ -45,10 +46,8 @@ def infer(model, session_id: int, input_ids: List, output_seqlen: int,
         for outputs in chatbot.stream_infer(session_id,
                                             input_ids,
                                             gen_config=gen_config,
-                                            request_output_len=output_seqlen,
                                             sequence_start=True,
                                             sequence_end=True,
-                                            ignore_eos=True,
                                             stream_output=True):
             _, res, n_token = outputs
             now = time.perf_counter()
@@ -69,12 +68,13 @@ def infer(model, session_id: int, input_ids: List, output_seqlen: int,
     que.put((session_id, stats))
 
 
-def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
-           warmup_round: int, gen_config: EngineGenerationConfig):
+def warmup(model, concurrency: int, input_ids: List[int], warmup_round: int,
+           gen_config: EngineGenerationConfig):
     if not warmup_round:
         return
 
     print('start to warmup ...')
+    output_seqlen = gen_config.max_new_tokens
 
     def _infer(model, session_id):
         chatbot = model.create_instance()
@@ -106,12 +106,11 @@ def warmup(model, concurrency: int, input_ids: List[int], output_seqlen: int,
 
 
 def profile_throughput(model_path: str, concurrency: int, input_seqlen: int,
-                       output_seqlen: int,
                        engine_config: Union[PytorchEngineConfig,
                                             TurbomindEngineConfig],
                        gen_config: EngineGenerationConfig, test_round: int,
                        warmup_round: int):
-
+    output_seqlen = gen_config.max_new_tokens
     print(f'profiling ... concurrency: {concurrency}, '
           f'n_prompt_token: {input_seqlen}, '
           f'n_completion_token: {output_seqlen}, '
@@ -127,8 +126,7 @@ def profile_throughput(model_path: str, concurrency: int, input_seqlen: int,
     # make up a dummy `input_ids` with the length of `input_seqlen` exactly
     assert input_seqlen > 0, 'input_seqlen should > 0'
     input_ids = np.random.randint(low=0, high=101, size=input_seqlen).tolist()
-    warmup(tm_model, concurrency, input_ids, output_seqlen, warmup_round,
-           gen_config)
+    warmup(tm_model, concurrency, input_ids, warmup_round, gen_config)
 
     que = Queue()
     procs = []
@@ -136,8 +134,8 @@ def profile_throughput(model_path: str, concurrency: int, input_seqlen: int,
 
     for i in range(concurrency):
         proc = Thread(target=infer,
-                      args=(tm_model, i + 1, input_ids, output_seqlen,
-                            gen_config, test_round, que))
+                      args=(tm_model, i + 1, input_ids, gen_config, test_round,
+                            que))
         procs.append(proc)
         proc.start()
 
@@ -376,7 +374,6 @@ def main():
                 profile_throughput,
                 concurrency=batch,
                 input_seqlen=prompt_tokens,
-                output_seqlen=completion_tokens,
                 engine_config=engine_config,
                 gen_config=gen_config,
                 test_round=args.test_round,
