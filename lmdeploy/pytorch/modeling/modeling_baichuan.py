@@ -25,13 +25,13 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
+#from .configuration_baichuan import BaiChuanConfig
+from transformers.configuration_utils import PretrainedConfig as BaiChuanConfig
 from transformers.modeling_outputs import (BaseModelOutputWithPast,
                                            CausalLMOutputWithPast)
 from transformers.utils import logging
 
 from lmdeploy.pytorch.modeling.convert_to_qmodules import convert_to_qmodules
-
-from .configuration_baichuan import BaiChuanConfig
 
 logger = logging.get_logger(__name__)
 

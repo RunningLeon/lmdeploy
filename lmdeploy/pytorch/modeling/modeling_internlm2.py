@@ -44,7 +44,9 @@ try:
 except:  # noqa # pylint: disable=bare-except
     BaseStreamer = None
 
-from .configuration_internlm import InternLMConfig as InternLM2Config
+# from .configuration_internlm import InternLMConfig as InternLM2Config
+from transformers.configuration_utils import \
+    PretrainedConfig as InternLM2Config
 
 logger = logging.get_logger(__name__)
 

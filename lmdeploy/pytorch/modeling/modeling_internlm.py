@@ -27,6 +27,8 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
+#from .configuration_internlm import InternLMConfig
+from transformers.configuration_utils import PretrainedConfig as InternLMConfig
 from transformers.generation.streamers import BaseStreamer
 from transformers.modeling_outputs import (BaseModelOutputWithPast,
                                            CausalLMOutputWithPast,
@@ -37,8 +39,6 @@ from transformers.utils import (add_start_docstrings,
                                 replace_return_docstrings)
 
 from lmdeploy.pytorch.modeling.convert_to_qmodules import convert_to_qmodules
-
-from .configuration_internlm import InternLMConfig
 
 logger = logging.get_logger(__name__)
 
