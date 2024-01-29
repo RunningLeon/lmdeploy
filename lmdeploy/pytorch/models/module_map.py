@@ -98,3 +98,11 @@ MODULE_MAP.update({
     'peft.tuners.lora.layer.Linear':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.peft.LoRALinear'
 })
+
+# mistral
+MODULE_MAP.update({
+    'modeling_moe_mistral.MistralAttention':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mistral.PatchedMistralAttention',
+    'modeling_moe_mistral.MistralModel':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mistral.PatchedMistralModel',
+})
