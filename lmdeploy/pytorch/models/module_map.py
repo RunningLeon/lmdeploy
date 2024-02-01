@@ -99,10 +99,18 @@ MODULE_MAP.update({
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.peft.LoRALinear'
 })
 
-# mistral
+# mixtral
 MODULE_MAP.update({
-    'modeling_moe_mistral.MistralAttention':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mistral.PatchedMistralAttention',
-    'modeling_moe_mistral.MistralModel':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mistral.PatchedMistralModel',
+    'transformers.models.mixtral.modeling_mixtral.MixtralAttention':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralAttention',
+    'transformers.models.mixtral.modeling_mixtral.MixtralFlashAttention2':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralAttention',
+    'transformers.models.mixtral.modeling_mixtral.MixtralSdpaAttention':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralAttention',
+    'transformers.models.mixtral.modeling_mixtral.MistralModel':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaModel',
+    'transformers.models.mixtral.modeling_mixtral.MixtralBLockSparseTop2MLP':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralBLockSparseTop2MLP',
+    'transformers.models.mixtral.modeling_mixtral.MixtralRMSNorm':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaRMSNorm',
 })
