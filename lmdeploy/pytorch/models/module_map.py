@@ -107,8 +107,8 @@ MODULE_MAP.update({
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralAttention',
     'transformers.models.mixtral.modeling_mixtral.MixtralSdpaAttention':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralAttention',
-    'transformers.models.mixtral.modeling_mixtral.MistralModel':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaModel',
+    'transformers.models.mixtral.modeling_mixtral.MixtralModel':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralModel',
     'transformers.models.mixtral.modeling_mixtral.MixtralBLockSparseTop2MLP':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mixtral.PatchedMixtralBLockSparseTop2MLP',
     'transformers.models.mixtral.modeling_mixtral.MixtralRMSNorm':
