@@ -31,6 +31,9 @@ jobs:
         cudaver: [11.8.0, 12.1.0]
     name: cuda-${{ matrix.cudaver }}
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -39,6 +42,7 @@ jobs:
         with:
           python-version: '3.8'
       - name: Install python packages
+        continue-on-error: true
         run: |
           pip install pybind11 wheel
       - uses: Jimver/cuda-toolkit@v0.2.11

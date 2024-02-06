@@ -57,6 +57,9 @@ jobs:
       matrix:
         pyver: ['3.8', '3.9', '3.10', '3.11']
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
