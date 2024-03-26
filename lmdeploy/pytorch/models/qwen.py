@@ -59,6 +59,7 @@ class PatchedQWenAttention(nn.Module):
         hidden_states: torch.Tensor,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         world_size: int = 1,
+        **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[Tuple[torch.Tensor]]]:
         """Rewrite implementation of QWenAttention.forward.
@@ -79,6 +80,14 @@ class PatchedQWenAttention(nn.Module):
             value_states = value_states.view(b, seq_len, num_heads,
                                              self.head_dim)
             return query_states, key_states, value_states
+
+        if not hasattr(self, 'use_dynamic_ntk'):
+            self.use_dynamic_ntk = kwargs.get('use_dynamic_ntk', False)
+        if not hasattr(self, 'rotary_emb'):
+            self.rotary_emb = kwargs.get('rotary_emb', None)
+            assert self.rotary_emb is not None
+        if not hasattr(self, '_ntk_cached'):
+            self._ntk_cached = 1.0
 
         def __rotary_emb_fn(query_states, key_states, value_states):
             """rotary embedding func."""
@@ -163,7 +172,7 @@ class PatchedQWenAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[Tuple[torch.Tensor]]]:
@@ -173,9 +182,9 @@ class PatchedQWenAttention(nn.Module):
             world_size = dist.get_world_size()
         return self._contiguous_batching_forward_impl(
             hidden_states,
-            past_key_value=layer_past,
+            past_key_value=past_key_value,
             world_size=world_size,
-        )
+            **kwargs)
 
 
 class PatchedQWenMLP(nn.Module):
@@ -200,6 +209,33 @@ class PatchedQWenMLP(nn.Module):
         return outputs
 
 
+class PatchedQWenBlock(nn.Module):
+
+    def forward(self,
+                hidden_states: Optional[Tuple[torch.FloatTensor]],
+                past_key_value: Optional[Tuple[torch.Tensor]] = None,
+                **kwargs):
+        layernorm_output = self.ln_1(hidden_states)
+
+        attn_outputs = self.attn(layernorm_output,
+                                 past_key_value=past_key_value,
+                                 **kwargs)
+        attn_output = attn_outputs[0]
+
+        outputs = attn_outputs[1:]
+
+        residual = hidden_states
+        layernorm_input = attn_output + residual
+
+        layernorm_output = self.ln_2(layernorm_input)
+
+        residual = layernorm_input
+        mlp_output = self.mlp(layernorm_output)
+        hidden_states = residual + mlp_output
+        outputs = (hidden_states, ) + outputs[1:]
+        return outputs
+
+
 class PatchedQWenModel(nn.Module):
 
     def _continuous_batching_forward(
@@ -214,15 +250,18 @@ class PatchedQWenModel(nn.Module):
 
         # Attention mask is not necessary in continuous batching
         hidden_states = inputs_embeds
-
+        attn_kwargs = {}
+        if getattr(self, 'rotary_emb', None):
+            attn_kwargs['rotary_emb'] = self.rotary_emb
+        if getattr(self, 'use_dynamic_ntk', False):
+            attn_kwargs['use_dynamic_ntk'] = True
         # decoder layers
         for idx, decoder_layer in enumerate(self.h):
             past_key_value = (past_key_values[idx]
                               if past_key_values is not None else None)
-            layer_outputs = decoder_layer(
-                hidden_states,
-                layer_past=past_key_value,
-            )
+            layer_outputs = decoder_layer(hidden_states,
+                                          past_key_value=past_key_value,
+                                          **attn_kwargs)
             hidden_states = layer_outputs[0]
 
         hidden_states = self.ln_f(hidden_states)
