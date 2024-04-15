@@ -224,6 +224,7 @@ class BaseChatTemplate(BaseModel):
         return ret
 
 
+@MODELS.register_module(name='cogvlm')
 @MODELS.register_module(name='wizardlm')
 @MODELS.register_module(name='vicuna')
 class Vicuna(BaseChatTemplate):
@@ -255,10 +256,13 @@ class Vicuna(BaseChatTemplate):
         Args:
             model_path (str): the model path used for matching.
         """
-        if 'vicuna' in model_path.lower():
+        path = model_path.lower()
+        if 'vicuna' in path:
             return 'vicuna'
-        if 'wizardlm' in model_path.lower():
+        if 'wizardlm' in path:
             return 'wizardlm'
+        if 'cogvlm' in path:
+            return 'cogvlm'
 
 
 @MODELS.register_module(name='internlm-chat')
