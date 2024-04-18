@@ -17,7 +17,7 @@ class CogVLMVisionModel(VisonModel):
     def __init__(self, model_path, device='cuda:0'):
         self.model_path = model_path
         self.device = device
-        self.dtype = torch.bfloat16
+        self.dtype = torch.float16
         self.hf_config = AutoConfig.from_pretrained(model_path,
                                             trust_remote_code=True)
         self.build_model()

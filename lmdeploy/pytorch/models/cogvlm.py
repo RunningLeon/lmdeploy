@@ -4,12 +4,12 @@ from typing import Optional, Tuple, Union, List
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch.nn import functional as F
 from torch.distributed._tensor import DeviceMesh
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ..dist_utils import (colwise_parallelize_linear_fn,
                           rowwise_parallelize_linear_fn)
 from ..kernels import apply_rotary_pos_emb, fill_kv_cache, paged_attention_fwd
+
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
@@ -20,19 +20,6 @@ def get_expert_mask(token_type_ids: "torch.LongTensor(B, L)") -> "[torch.BoolTen
     vision_token_mask[:, :-1] = (token_type_ids[:, :-1] == VISION_TOKEN_TYPE) & (token_type_ids[:, 1:] == VISION_TOKEN_TYPE)
     language_token_mask = ~vision_token_mask
     return vision_token_mask, language_token_mask
-
-
-def rotate_half(x):
-    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=x1.ndim - 1)
-
-
-def apply_rotary_pos_emb_index_bhs(q, k, cos, sin, position_id):
-    # batch_size, num_head, seq_len, hidden_size
-    cos, sin = F.embedding(position_id, cos.squeeze(1)).unsqueeze(1), \
-        F.embedding(position_id, sin.squeeze(1)).unsqueeze(1)
-    q, k = (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
-    return q, k
 
 
 class PatchedVisionExpertAttention(nn.Module):
@@ -75,6 +62,7 @@ class PatchedVisionExpertAttention(nn.Module):
         block_offsets = context.block_offsets
         max_q_seq_length = context.max_q_seq_length
         max_kv_seq_length = context.max_kv_seq_length
+        position_ids_1d = context.position_ids_1d
         num_heads = self.num_heads // world_size
         num_kv_heads = self.num_heads // world_size
         head_dim = self.head_dim
@@ -84,8 +72,9 @@ class PatchedVisionExpertAttention(nn.Module):
         def __qkv_proj(hidden_states):
             """qkv_proj."""
             shape = list(hidden_states.shape)
-            shape[-1] = shape[-1] * 3
+            shape[-1] = shape[-1] * 3 // world_size
             mixed_raw_layer = torch.empty(shape, dtype=hidden_states.dtype, device=hidden_states.device)
+            
             mixed_raw_layer[vision_token_mask] = self.vision_expert_query_key_value(hidden_states[vision_token_mask])
             mixed_raw_layer[language_token_mask] = self.language_expert_query_key_value(hidden_states[language_token_mask])
             query_states, key_states, value_states = torch.split(mixed_raw_layer, hidden_size, dim=-1)
@@ -94,15 +83,18 @@ class PatchedVisionExpertAttention(nn.Module):
         def __rotary_emb_fn(query_states, key_states, value_states):
             """rotary embedding func."""
             cos, sin = self.rotary_emb(value_states,
-                                        seq_len=max_kv_seq_length)
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin, position_ids,
-                context.position_ids_1d)
-            # query_states, key_states = apply_rotary_pos_emb_index_bhs(query_states, key_states, cos, sin, position_ids)
+                                        seq_len=max_kv_seq_length) # TODO: this should be position_ids.max()
+            query_states, key_states = apply_rotary_pos_emb(query_states, 
+                                                                      key_states, 
+                                                                      cos.squeeze(1), 
+                                                                      sin.squeeze(1), 
+                                                                      position_ids,
+                                                                      position_ids_1d=position_ids_1d)
             return query_states, key_states, value_states
-
+        
+  
         query_states, key_states, value_states = __qkv_proj(hidden_states)
-
+        
         query_states = query_states.view(-1, num_heads, head_dim)
         key_states = key_states.view(-1, num_kv_heads, head_dim)
         value_states = value_states.view(-1, num_kv_heads, head_dim)
@@ -135,11 +127,16 @@ class PatchedVisionExpertAttention(nn.Module):
             max_seqlen=max_q_seq_length,
         )
         context_layer = context_layer.reshape(*hidden_states.shape[:-1], -1)
+        ctx_shape = list(context_layer.shape)
+        ctx_shape[-1] *= world_size
 
-        attn_output = torch.empty(context_layer.shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        attn_output[vision_token_mask] = self.vision_expert_dense(context_layer[vision_token_mask])
-        attn_output[language_token_mask] = self.language_expert_dense(context_layer[language_token_mask])
+        attn_output = torch.empty(ctx_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
+        attn_output_vision = self.vision_expert_dense(context_layer[vision_token_mask])
+        attn_output_language = self.language_expert_dense(context_layer[language_token_mask])
+
+        attn_output[vision_token_mask] = attn_output_vision
+        attn_output[language_token_mask] = attn_output_language
         return attn_output, None, past_key_value
 
     def forward(
@@ -234,6 +231,11 @@ class PatchedCogVLMModel(nn.Module):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         # not allow for inputs_embeds, because we want to process image feature
         assert input_ids is not None
+        # print(f'vision_embeddings={vision_embeddings}')
+        # print(f'vision_embedding_ranges={vision_embedding_ranges}')
+        # TODO support vision inputs
+        vision_embeddings = None
+        vision_embedding_ranges = None
         inputs_embeds = self.embed_tokens(input_ids)
         if vision_embeddings is not None:  # multi-modality
             assert token_type_ids is not None, f"multi-modality requires `token_type_ids`!"
@@ -261,7 +263,7 @@ class PatchedCogVLMModel(nn.Module):
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
+            past_key_values=past_key_value,
             hidden_states=None,
             attentions=None,
         )
@@ -272,8 +274,8 @@ class PatchedCogVLMForCausalLM(nn.Module):
     def forward(
             self,
             input_ids: torch.LongTensor = None,
-            input_embeddings: List[torch.Tensor]=None,
-            input_embedding_ranges = None,
+            vision_embeddings: List[torch.Tensor]=None,
+            vision_embedding_ranges = None,
             token_type_ids: Optional[torch.LongTensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -282,8 +284,8 @@ class PatchedCogVLMForCausalLM(nn.Module):
         outputs = self.model(
             input_ids=input_ids,
             token_type_ids=token_type_ids,
-            vision_embeddings=input_embeddings,
-            vision_embedding_ranges=input_embedding_ranges,
+            vision_embeddings=vision_embeddings,
+            vision_embedding_ranges=vision_embedding_ranges,
             position_ids=position_ids,
             past_key_values=past_key_values,
         )
