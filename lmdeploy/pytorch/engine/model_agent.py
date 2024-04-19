@@ -18,6 +18,8 @@ from ..config import CacheConfig, ModelConfig
 from ..models import patch
 from ..utils import get_gpu_memory
 from .cache_engine import CacheEngine
+from ..messages import InputEmbeddings
+
 
 logger = get_logger('lmdeploy')
 
@@ -125,6 +127,9 @@ class ModelInputs:
     adapter_offsets: torch.LongTensor = None
     max_rank: int = 0
     meta: Any = None
+    input_embeddings: List[torch.Tensor] = None
+    input_embedding_ranges: torch.LongTensor = None
+    token_type_ids: torch.Tensor = None
 
     def update(self, input_ids: torch.LongTensor):
         """update input ids."""
@@ -191,6 +196,8 @@ class ModelInputs:
         for k, v in input_dict.items():
             if isinstance(v, torch.Tensor):
                 v = v.to(device)
+            elif isinstance(v, List) and len(v) > 0 and isinstance(v[0], torch.Tensor()):
+                v = [_.to(device) for _ in v]
             out_dict[k] = v
 
         return ModelInputs(**out_dict)
@@ -345,6 +352,14 @@ def model_forward(
     stream: torch.cuda.Stream = None,
 ):
     """perform model forward."""
+    is_vlm = json_config['architectures'][0] in ['CogVLMForCausalLM']
+    extra_kwargs = {}
+    if is_vlm:
+        extra_kwargs.update(dict(
+            input_embeddings=inputs.input_embeddings,
+            input_embedding_ranges=inputs.input_embedding_ranges,
+            token_type_ids=inputs.token_type_ids))
+
     stream = stream or torch.cuda.current_stream()
     with torch.inference_mode(), torch.cuda.stream(stream):
         # forward
@@ -366,6 +381,7 @@ def model_forward(
             output_hidden_states=False,
             use_origin=False,
             context=context,
+            **extra_kwargs
         )
     return dict(logits=output['logits'], custom_outputs=context._outputs)
 
@@ -516,6 +532,9 @@ class BaseModelAgent(AutoModelAgent):
                 **self.model_config.init_kwargs)
             hf_model.eval()
             hf_model.config.use_cache = True
+            #TODO build for vlm model
+            if hasattr(hf_model, 'model') and hasattr(hf_model.model, 'vision'):
+                del hf_model.model.vision
 
         if adapters:
             _load_adapters(hf_model, adapters)

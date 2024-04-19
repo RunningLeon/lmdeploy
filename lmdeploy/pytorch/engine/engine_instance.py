@@ -4,7 +4,7 @@ from typing import List
 from lmdeploy.messages import EngineGenerationConfig
 from lmdeploy.utils import get_logger
 
-from ..messages import SamplingParam
+from ..messages import SamplingParam, InputEmbeddings
 from .engine import Engine
 from .request import RequestSender, RequestType, Response, ResponseType
 
@@ -120,6 +120,7 @@ class EngineInstance:
                                  input_ids: List[int],
                                  gen_config: EngineGenerationConfig = None,
                                  adapter_name: str = None,
+                                 input_embeddings: List[InputEmbeddings]=None,
                                  **kwargs):
         """Send stream inference request.
 
@@ -142,6 +143,7 @@ class EngineInstance:
             session_id=session_id,
             sampling_param=sampling_param,
             adapter_name=adapter_name,
+            input_embeddings=input_embeddings
         )
         req_id = await self.req_sender.async_send_async(
             RequestType.ADD_MESSAGE, msg)
@@ -171,6 +173,7 @@ class EngineInstance:
                           session_id: int,
                           input_ids: List[int] = None,
                           gen_config: EngineGenerationConfig = None,
+                          input_embeddings: List[InputEmbeddings]=None,
                           **kwargs):
         """Send inference request.
 
@@ -188,6 +191,7 @@ class EngineInstance:
         async for outputs in self.async_stream_infer(session_id,
                                                      input_ids,
                                                      gen_config=gen_config,
+                                                    input_embeddings=input_embeddings,
                                                      **kwargs):
             status, tmp_ids, _ = outputs
             if status not in [ResponseType.SUCCESS, ResponseType.FINISH]:
@@ -201,6 +205,7 @@ class EngineInstance:
                      input_ids: List[int],
                      gen_config: EngineGenerationConfig = None,
                      adapter_name: str = None,
+                     input_embeddings: List[InputEmbeddings]=None,
                      **kwargs):
         """Send stream inference request.
 
@@ -220,6 +225,7 @@ class EngineInstance:
             """call async."""
             coro_gen = self.async_stream_infer(session_id, input_ids,
                                                gen_config, adapter_name,
+                                               input_embeddings=input_embeddings,
                                                **kwargs)
             while True:
                 try:
@@ -240,6 +246,7 @@ class EngineInstance:
             session_id=session_id,
             sampling_param=sampling_param,
             adapter_name=adapter_name,
+            input_embeddings=input_embeddings,
         )
         req_id = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
 
@@ -298,7 +305,9 @@ class EngineInstance:
                                   token_ids: List[List[int]] = None,
                                   gen_config: EngineGenerationConfig = None,
                                   adapter_names: List[str] = None,
-                                  keep_cache: bool = False):
+                                  keep_cache: bool = False,
+                                  input_embeddings: List[List[InputEmbeddings]]=None,
+                                  ):
         """Send inference request.
 
         Args:
@@ -320,19 +329,26 @@ class EngineInstance:
         else:
             adapter_names = [None for _ in range(batch_size)]
 
+        if input_embeddings is not None:
+            assert len(input_embeddings) == batch_size
+        else:
+            input_embeddings = [None] * batch_size
+
         async def _add_sessions(session_ids):
             for session_id in session_ids:
                 await self._async_try_add_session(session_id)
 
-        async def _add_messages(session_ids, token_ids):
+        async def _add_messages(session_ids, token_ids, input_embeddings):
             add_msgs = []
             sampling_param = SamplingParam.from_gen_config(gen_config)
-            for session_id, token_id, adapter_name in zip(
-                    session_ids, token_ids, adapter_names):
+            for session_id, token_id, adapter_name, input_emb in zip(
+                    session_ids, token_ids, adapter_names, input_embeddings):
                 msg = dict(token_ids=token_id,
                            session_id=session_id,
                            sampling_param=sampling_param,
-                           adapter_name=adapter_name)
+                           adapter_name=adapter_name,
+                           input_embeddings=input_emb,
+                           )
                 add_msgs.append(msg)
             req_types = [RequestType.ADD_MESSAGE] * batch_size
             req_ids = await self.req_sender.async_batched_send_async(
@@ -340,7 +356,7 @@ class EngineInstance:
             return req_ids
 
         await _add_sessions(session_ids)
-        req_ids = await _add_messages(session_ids, token_ids)
+        req_ids = await _add_messages(session_ids, token_ids, input_embeddings)
 
         # receive messages
         req_idx_map = dict(zip(req_ids, range(len(req_ids))))
@@ -379,12 +395,15 @@ class EngineInstance:
                       token_ids: List[List[int]] = None,
                       gen_config: EngineGenerationConfig = None,
                       adapter_names: List[str] = None,
-                      keep_cache: bool = False):
+                      keep_cache: bool = False,
+                      input_embeddings: List[InputEmbeddings]=None,
+                      ):
         """batched infer."""
         coro = self.async_batched_infer(session_ids,
                                         token_ids,
                                         gen_config=gen_config,
                                         adapter_names=adapter_names,
+                                        input_embeddings=input_embeddings,
                                         keep_cache=keep_cache)
         return self.req_sender.run_until_complete(coro)
 
