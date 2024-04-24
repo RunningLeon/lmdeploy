@@ -18,8 +18,6 @@ from ..config import CacheConfig, ModelConfig
 from ..models import patch
 from ..utils import get_gpu_memory
 from .cache_engine import CacheEngine
-from ..messages import InputEmbeddings
-
 
 logger = get_logger('lmdeploy')
 
@@ -201,7 +199,8 @@ class ModelInputs:
         for k, v in input_dict.items():
             if isinstance(v, torch.Tensor):
                 v = v.to(device)
-            elif isinstance(v, List) and len(v) > 0 and isinstance(v[0], torch.Tensor):
+            elif isinstance(v, List) and len(v) > 0 and isinstance(
+                    v[0], torch.Tensor):
                 v = [_.to(device) for _ in v]
             out_dict[k] = v
 
@@ -278,7 +277,7 @@ class StepContext:
                 position_ids += history_position_lengths.unsqueeze(-1)
             else:
                 position_ids = inputs.position_ids
-            
+
         # position ids 1d
         position_ids_1d = cls.get_position_ids_1d(position_ids, q_seq_length,
                                                   device)
@@ -291,26 +290,27 @@ class StepContext:
         if window_size > 0:
             kv_seq_length -= inputs.num_ignored_history
 
-        ret = StepContext(inputs=inputs,
-                          block_offsets=inputs.block_offsets,
-                          position_ids=position_ids,
-                          position_ids_1d=position_ids_1d,
-                          attention_mask=attention_mask,
-                          q_start_loc=q_start_loc,
-                          history_lengths=inputs.history_lengths,
-                          history_position_lengths=inputs.history_position_lengths,
-                          q_seq_length=inputs.seq_length,
-                          kv_seq_length=kv_seq_length,
-                          max_q_seq_length=max_q_seq_length,
-                          max_kv_seq_length=max_kv_seq_length,
-                          kv_caches=kv_caches,
-                          is_decoding=inputs.is_decoding,
-                          world_size=world_size,
-                          json_config=json_config,
-                          local_adapter_ids=inputs.local_adapter_ids,
-                          global_adapter_ids=inputs.global_adapter_ids,
-                          adapter_offsets=inputs.adapter_offsets,
-                          max_rank=inputs.max_rank)
+        ret = StepContext(
+            inputs=inputs,
+            block_offsets=inputs.block_offsets,
+            position_ids=position_ids,
+            position_ids_1d=position_ids_1d,
+            attention_mask=attention_mask,
+            q_start_loc=q_start_loc,
+            history_lengths=inputs.history_lengths,
+            history_position_lengths=inputs.history_position_lengths,
+            q_seq_length=inputs.seq_length,
+            kv_seq_length=kv_seq_length,
+            max_q_seq_length=max_q_seq_length,
+            max_kv_seq_length=max_kv_seq_length,
+            kv_caches=kv_caches,
+            is_decoding=inputs.is_decoding,
+            world_size=world_size,
+            json_config=json_config,
+            local_adapter_ids=inputs.local_adapter_ids,
+            global_adapter_ids=inputs.global_adapter_ids,
+            adapter_offsets=inputs.adapter_offsets,
+            max_rank=inputs.max_rank)
         return ret
 
     @classmethod
@@ -321,7 +321,7 @@ class StepContext:
         """get 1d position_ids."""
         if position_ids.ndim == 1:
             return position_ids
-        
+
         if position_ids.size(1) == 1:
             position_ids_1d = position_ids.flatten()
         else:
@@ -359,21 +359,20 @@ def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict,
             event.wait()
 
 
-def model_forward(
-    patched_model: torch.nn.Module,
-    inputs: ModelInputs,
-    cache_engine: CacheEngine,
-    json_config: dict = None,
-    world_size: int = 1,
-    stream: torch.cuda.Stream = None,
-    task_type: Literal['llm', 'vlm'] = 'llm'
-):
+def model_forward(patched_model: torch.nn.Module,
+                  inputs: ModelInputs,
+                  cache_engine: CacheEngine,
+                  json_config: dict = None,
+                  world_size: int = 1,
+                  stream: torch.cuda.Stream = None,
+                  task_type: Literal['llm', 'vlm'] = 'llm'):
     """perform model forward."""
     extra_kwargs = {}
     if task_type == 'vlm' and not inputs.is_decoding:
-        extra_kwargs.update(dict(
-            input_embeddings=inputs.input_embeddings,
-            input_embedding_ranges=inputs.input_embedding_ranges,
+        extra_kwargs.update(
+            dict(
+                input_embeddings=inputs.input_embeddings,
+                input_embedding_ranges=inputs.input_embedding_ranges,
             ))
         if inputs.token_type_ids is not None:
             extra_kwargs['token_type_ids'] = inputs.token_type_ids
@@ -399,8 +398,7 @@ def model_forward(
             output_hidden_states=False,
             use_origin=False,
             context=context,
-            **extra_kwargs
-        )
+            **extra_kwargs)
     return dict(logits=output['logits'], custom_outputs=context._outputs)
 
 
@@ -550,8 +548,9 @@ class BaseModelAgent(AutoModelAgent):
                 **self.model_config.init_kwargs)
             hf_model.eval()
             hf_model.config.use_cache = True
-            #TODO build for vlm model
-            if hasattr(hf_model, 'model') and hasattr(hf_model.model, 'vision'):
+            # build for vlm model, TODO
+            if hasattr(hf_model, 'model') and hasattr(hf_model.model,
+                                                      'vision'):
                 del hf_model.model.vision
 
         if adapters:
@@ -583,15 +582,13 @@ class BaseModelAgent(AutoModelAgent):
         cache_swapping(self.cache_engine,
                        swap_in_map=swap_in_map,
                        swap_out_map=swap_out_map)
-        output = model_forward(
-            self.patched_model,
-            inputs,
-            self.cache_engine,
-            self.model_config.json_config,
-            world_size=1,
-            stream=self.stream,
-            task_type=self.model_config.task_type
-        )
+        output = model_forward(self.patched_model,
+                               inputs,
+                               self.cache_engine,
+                               self.model_config.json_config,
+                               world_size=1,
+                               stream=self.stream,
+                               task_type=self.model_config.task_type)
         return output
 
     def forward(self, inputs: ModelInputs, swap_in_map: SwapMap,
@@ -879,15 +876,13 @@ def _tp_model_loop(
                        swap_in_map=swap_in_map,
                        swap_out_map=swap_out_map)
 
-        model_forward(
-            patched_model,
-            inputs,
-            cache_engine,
-            model_config.json_config,
-            world_size=world_size,
-            stream=stream,
-            task_type=model_config.task_type
-        )
+        model_forward(patched_model,
+                      inputs,
+                      cache_engine,
+                      model_config.json_config,
+                      world_size=world_size,
+                      stream=stream,
+                      task_type=model_config.task_type)
 
 
 def _start_tp_process(proc_id: int,
@@ -1088,15 +1083,13 @@ class TPModelAgent(AutoModelAgent):
         cache_swapping(self.cache_engine,
                        swap_in_map=swap_in_map,
                        swap_out_map=swap_out_map)
-        output = model_forward(
-            self.patched_model,
-            inputs,
-            self.cache_engine,
-            self.model_config.json_config,
-            world_size=1,
-            stream=self.stream,
-            task_type=self.model_config.task_type
-        )
+        output = model_forward(self.patched_model,
+                               inputs,
+                               self.cache_engine,
+                               self.model_config.json_config,
+                               world_size=1,
+                               stream=self.stream,
+                               task_type=self.model_config.task_type)
         return output
 
     def forward(self, inputs: ModelInputs, swap_in_map: SwapMap,

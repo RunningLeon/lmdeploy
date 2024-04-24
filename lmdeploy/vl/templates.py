@@ -144,6 +144,7 @@ class QwenVLChatTemplateWrapper(VLChatTemplateWrapper):
         res = res + prompt
         return res
 
+
 class CogVLMChatTemplateWrapper(VLChatTemplateWrapper):
     """cogvlm chat template wrapper."""
 
@@ -179,7 +180,8 @@ class CogVLMChatTemplateWrapper(VLChatTemplateWrapper):
         prompt = ''
         for i, msg in enumerate(new_messages):
             num_images = msg.pop('num_images', 0)
-            prompt_i = self.chat_template.messages2prompt([msg], sequence_start)
+            prompt_i = self.chat_template.messages2prompt([msg],
+                                                          sequence_start)
             if num_images > 0:
                 prompt_i = (IMAGE_TOKEN * num_images) + prompt_i
             prompt += prompt_i

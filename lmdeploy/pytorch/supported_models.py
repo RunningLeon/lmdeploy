@@ -47,8 +47,7 @@ _SUPPORTED_ARCHS = dict(
     # llava
     LlavaLlamaForCausalLM=False,
     # deepseekvl
-    MultiModalityCausalLM=False
-)
+    MultiModalityCausalLM=False)
 
 
 def is_supported(model_path: str):

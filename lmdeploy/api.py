@@ -63,8 +63,7 @@ def pipeline(model_path: str,
 
     _, pipeline_class = get_task(model_path)
 
-    if type(
-            backend_config) is not PytorchEngineConfig:
+    if type(backend_config) is not PytorchEngineConfig:
         # set auto backend mode
         backend_config = autoget_backend_config(model_path, backend_config)
     backend = 'pytorch' if type(

@@ -3,8 +3,8 @@
 from typing import List
 
 import torch
-from torchvision import transforms
 from PIL.Image import Image
+from torchvision import transforms
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from lmdeploy.vl.model.base import VisonModel
@@ -19,18 +19,16 @@ class CogVLMVisionModel(VisonModel):
         self.device = device
         self.dtype = torch.float16
         self.hf_config = AutoConfig.from_pretrained(model_path,
-                                            trust_remote_code=True)
+                                                    trust_remote_code=True)
         self.build_model()
-        self.image_transform = transforms.Compose(
-                [
-                    transforms.Resize(
-                        (self.hf_config.vision_config['image_size'],) * 2, 
-                        interpolation=transforms.InterpolationMode.BICUBIC
-                    ),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-                ]
-            )
+        self.image_transform = transforms.Compose([
+            transforms.Resize(
+                (self.hf_config.vision_config['image_size'], ) * 2,
+                interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073),
+                                 (0.26862954, 0.26130258, 0.27577711)),
+        ])
 
     def build_model(self):
         from accelerate import init_empty_weights

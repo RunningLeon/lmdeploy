@@ -228,17 +228,16 @@ class BaseChatTemplate(BaseModel):
 class CogVLM(BaseChatTemplate):
     """Chat template of vicuna model."""
 
-    def __init__(
-            self,
-            meta_instruction='',
-            eosys='',
-            user='Question: ',
-            separator='\n',
-            eoh=' ',
-            assistant='Answer:',
-            eoa='</s>',
-            stop_words=['</s>'],
-            **kwargs):
+    def __init__(self,
+                 meta_instruction='',
+                 eosys='',
+                 user='Question: ',
+                 separator='\n',
+                 eoh=' ',
+                 assistant='Answer:',
+                 eoa='</s>',
+                 stop_words=['</s>'],
+                 **kwargs):
         super().__init__(meta_instruction=meta_instruction,
                          eosys=eosys,
                          user=user,
@@ -297,6 +296,7 @@ class Vicuna(BaseChatTemplate):
             return 'vicuna'
         if 'wizardlm' in path:
             return 'wizardlm'
+
 
 @MODELS.register_module(name='internlm-chat')
 @MODELS.register_module(name='internlm-chat-7b')

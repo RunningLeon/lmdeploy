@@ -1,23 +1,30 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Optional, Tuple, Union, List
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch.distributed._tensor import DeviceMesh
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import (BaseModelOutputWithPast,
+                                           CausalLMOutputWithPast)
+
 from ..dist_utils import (colwise_parallelize_linear_fn,
                           rowwise_parallelize_linear_fn)
 from ..kernels import apply_rotary_pos_emb, fill_kv_cache, paged_attention_fwd
 
-
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
 
+# flake8: noqa: F821
 
-def get_expert_mask(token_type_ids: "torch.LongTensor(B, L)") -> "[torch.BoolTensor(B, L), torch.BoolTensor(B, L)]":
+
+def get_expert_mask(
+    token_type_ids: 'torch.LongTensor(B, L)'
+) -> '[torch.BoolTensor(B, L), torch.BoolTensor(B, L)]':
     vision_token_mask = torch.zeros_like(token_type_ids, dtype=torch.bool)
-    vision_token_mask[:, :-1] = (token_type_ids[:, :-1] == VISION_TOKEN_TYPE) & (token_type_ids[:, 1:] == VISION_TOKEN_TYPE)
+    vision_token_mask[:, :-1] = (token_type_ids[:, :-1]
+                                 == VISION_TOKEN_TYPE) & (token_type_ids[:, 1:]
+                                                          == VISION_TOKEN_TYPE)
     language_token_mask = ~vision_token_mask
     return vision_token_mask, language_token_mask
 
@@ -27,7 +34,10 @@ class PatchedVisionExpertAttention(nn.Module):
     def _distribute_partition_fn(self, mod_name: str, mod: nn.Module,
                                  device_mesh: DeviceMesh):
         """Distribution partition callback."""
-        if mod_name in ['vision_expert_query_key_value', 'language_expert_query_key_value']:
+        if mod_name in [
+                'vision_expert_query_key_value',
+                'language_expert_query_key_value'
+        ]:
             colwise_parallelize_linear_fn(mod,
                                           device_mesh=device_mesh,
                                           to_local=True)
@@ -67,34 +77,41 @@ class PatchedVisionExpertAttention(nn.Module):
         num_kv_heads = self.num_heads // world_size
         head_dim = self.head_dim
         hidden_size = num_heads * head_dim
-        vision_token_mask, language_token_mask = get_expert_mask(token_type_ids)
+        vision_token_mask, language_token_mask = get_expert_mask(
+            token_type_ids)
 
         def __qkv_proj(hidden_states):
             """qkv_proj."""
             shape = list(hidden_states.shape)
             shape[-1] = shape[-1] * 3 // world_size
-            mixed_raw_layer = torch.empty(shape, dtype=hidden_states.dtype, device=hidden_states.device)
-            
-            mixed_raw_layer[vision_token_mask] = self.vision_expert_query_key_value(hidden_states[vision_token_mask])
-            mixed_raw_layer[language_token_mask] = self.language_expert_query_key_value(hidden_states[language_token_mask])
-            query_states, key_states, value_states = torch.split(mixed_raw_layer, hidden_size, dim=-1)
+            mixed_raw_layer = torch.empty(shape,
+                                          dtype=hidden_states.dtype,
+                                          device=hidden_states.device)
+
+            mixed_raw_layer[
+                vision_token_mask] = self.vision_expert_query_key_value(
+                    hidden_states[vision_token_mask])
+            mixed_raw_layer[
+                language_token_mask] = self.language_expert_query_key_value(
+                    hidden_states[language_token_mask])
+            query_states, key_states, value_states = torch.split(
+                mixed_raw_layer, hidden_size, dim=-1)
             return query_states, key_states, value_states
 
         def __rotary_emb_fn(query_states, key_states, value_states):
             """rotary embedding func."""
-            cos, sin = self.rotary_emb(value_states,
-                                        seq_len=max_kv_seq_length)
-            query_states, key_states = apply_rotary_pos_emb(query_states, 
-                                                                      key_states, 
-                                                                      cos.squeeze(1), 
-                                                                      sin.squeeze(1), 
-                                                                      position_ids,
-                                                                      position_ids_1d=position_ids_1d)
+            cos, sin = self.rotary_emb(value_states, seq_len=max_kv_seq_length)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states,
+                key_states,
+                cos.squeeze(1),
+                sin.squeeze(1),
+                position_ids,
+                position_ids_1d=position_ids_1d)
             return query_states, key_states, value_states
-        
-  
+
         query_states, key_states, value_states = __qkv_proj(hidden_states)
-        
+
         query_states = query_states.view(-1, num_heads, head_dim)
         key_states = key_states.view(-1, num_kv_heads, head_dim)
         value_states = value_states.view(-1, num_kv_heads, head_dim)
@@ -130,10 +147,14 @@ class PatchedVisionExpertAttention(nn.Module):
         ctx_shape = list(context_layer.shape)
         ctx_shape[-1] *= world_size
 
-        attn_output = torch.empty(ctx_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        attn_output = torch.empty(ctx_shape,
+                                  dtype=hidden_states.dtype,
+                                  device=hidden_states.device)
 
-        attn_output_vision = self.vision_expert_dense(context_layer[vision_token_mask])
-        attn_output_language = self.language_expert_dense(context_layer[language_token_mask])
+        attn_output_vision = self.vision_expert_dense(
+            context_layer[vision_token_mask])
+        attn_output_language = self.language_expert_dense(
+            context_layer[language_token_mask])
 
         attn_output[vision_token_mask] = attn_output_vision
         attn_output[language_token_mask] = attn_output_language
@@ -163,26 +184,33 @@ class PatchedVisionExpertAttention(nn.Module):
 
 class PatchedVisionExpertMLP(nn.Module):
 
-    def forward(self, hidden_states: "torch.Tensor(B, L, D)", token_type_ids: "torch.LongTensor(B, L)"):
-        output = torch.empty(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        vision_token_mask, language_token_mask = get_expert_mask(token_type_ids)
-        output[vision_token_mask] = self.vision_mlp(hidden_states[vision_token_mask])
-        output[language_token_mask] = self.language_mlp(hidden_states[language_token_mask])
+    def forward(self, hidden_states: 'torch.Tensor(B, L, D)',
+                token_type_ids: 'torch.LongTensor(B, L)'):
+        output = torch.empty(hidden_states.shape,
+                             dtype=hidden_states.dtype,
+                             device=hidden_states.device)
+        vision_token_mask, language_token_mask = get_expert_mask(
+            token_type_ids)
+        output[vision_token_mask] = self.vision_mlp(
+            hidden_states[vision_token_mask])
+        output[language_token_mask] = self.language_mlp(
+            hidden_states[language_token_mask])
         return output
 
 
 class PatchedCogVLMDecoderLayer(nn.Module):
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            token_type_ids: torch.LongTensor,
-            position_ids: torch.LongTensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            past_key_value: Optional[Tuple[torch.Tensor]] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        self,
+        hidden_states: torch.Tensor,
+        token_type_ids: torch.LongTensor,
+        position_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor,
+                                                 torch.FloatTensor]]]:
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -205,41 +233,41 @@ class PatchedCogVLMDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states, token_type_ids=token_type_ids)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        outputs = (hidden_states, )
 
         if output_attentions:
-            outputs += (self_attn_weights,)
+            outputs += (self_attn_weights, )
 
         if use_cache:
-            outputs += (present_key_value,)
+            outputs += (present_key_value, )
 
         return outputs  # type: ignore
 
 
-
 class PatchedCogVLMModel(nn.Module):
 
-    def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            vision_embeddings: Optional[List[torch.Tensor]]=None,
-            vision_embedding_ranges: Optional[torch.LongTensor] = None,
-            token_type_ids: Optional[torch.LongTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            **kwargs
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    def forward(self,
+                input_ids: torch.LongTensor = None,
+                vision_embeddings: Optional[List[torch.Tensor]] = None,
+                vision_embedding_ranges: Optional[torch.LongTensor] = None,
+                token_type_ids: Optional[torch.LongTensor] = None,
+                position_ids: Optional[torch.LongTensor] = None,
+                past_key_values: Optional[List[torch.FloatTensor]] = None,
+                **kwargs) -> Union[Tuple, BaseModelOutputWithPast]:
         # not allow for inputs_embeds, because we want to process image feature
         assert input_ids is not None
         inputs_embeds = self.embed_tokens(input_ids)
-        if vision_embeddings is not None and len(vision_embeddings) > 0:  # multi-modality
-            assert token_type_ids is not None, f"multi-modality requires `token_type_ids`!"
+        if vision_embeddings is not None and len(vision_embeddings) > 0:
+            # multi-modality
+            assert token_type_ids is not None, 'multi-modality requires `token_type_ids`!'
             assert len(vision_embeddings) == len(vision_embedding_ranges)
             for emb, ranges in zip(vision_embeddings, vision_embedding_ranges):
                 inputs_embeds[0, ranges[0]:ranges[1]] = emb.to(inputs_embeds)
         else:
             if token_type_ids is None:
-                token_type_ids = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device) * LANGUAGE_TOKEN_TYPE
+                token_type_ids = torch.ones_like(
+                    input_ids, dtype=torch.long,
+                    device=input_ids.device) * LANGUAGE_TOKEN_TYPE
         hidden_states = inputs_embeds
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -264,16 +292,14 @@ class PatchedCogVLMModel(nn.Module):
 
 class PatchedCogVLMForCausalLM(nn.Module):
 
-    def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            input_embeddings: Optional[List[torch.Tensor]]=None,
-            input_embedding_ranges: Optional[torch.LongTensor] = None,
-            token_type_ids: Optional[torch.LongTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            **kwargs
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    def forward(self,
+                input_ids: torch.LongTensor = None,
+                input_embeddings: Optional[List[torch.Tensor]] = None,
+                input_embedding_ranges: Optional[torch.LongTensor] = None,
+                token_type_ids: Optional[torch.LongTensor] = None,
+                position_ids: Optional[torch.LongTensor] = None,
+                past_key_values: Optional[List[torch.FloatTensor]] = None,
+                **kwargs) -> Union[Tuple, CausalLMOutputWithPast]:
         outputs = self.model(
             input_ids=input_ids,
             token_type_ids=token_type_ids,

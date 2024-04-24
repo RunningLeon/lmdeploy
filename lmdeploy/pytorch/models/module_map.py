@@ -232,7 +232,7 @@ MODULE_MAP.update({
     'modeling_dbrx.RMSNorm':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaRMSNorm',
     'modeling_cogvlm.MLP':
-     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaMLP',
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaMLP',
     'modeling_cogvlm.VisionExpertMLP':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.cogvlm.PatchedVisionExpertMLP',
     'modeling_cogvlm.VisionExpertAttention':

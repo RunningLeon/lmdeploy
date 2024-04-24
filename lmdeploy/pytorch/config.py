@@ -77,7 +77,8 @@ class ModelConfig:
     hf_config: Any = None
     init_kwargs: Dict[str, Any] = field(default_factory=dict)
     task_type: Literal['llm', 'vlm'] = 'llm'
-    
+    model_arch: str = None
+
     def get_head_size(self):
         """get head size."""
         return self.head_dim
@@ -208,6 +209,8 @@ class ModelConfig:
 
         model_config.hf_config = hf_config
         model_config.json_config = hf_config.to_dict()
-        model_config.task_type = 'vlm' if check_vl_llm(model_config.json_config) else 'llm'
-        
+        model_config.task_type = 'vlm' if check_vl_llm(
+            model_config.json_config) else 'llm'
+        model_config.model_arch = model_config.json_config.get(
+            'architectures', [None])[0]
         return model_config
