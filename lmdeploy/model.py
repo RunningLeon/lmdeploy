@@ -236,7 +236,7 @@ class CogVLM(BaseChatTemplate):
             separator='\n',
             eoh=' ',
             assistant='Answer: ',
-            eoa='',
+            eoa='</s>',
             stop_words=['</s>'],
             **kwargs):
         super().__init__(meta_instruction=meta_instruction,

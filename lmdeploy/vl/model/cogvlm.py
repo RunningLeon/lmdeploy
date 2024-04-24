@@ -50,7 +50,6 @@ class CogVLMVisionModel(VisonModel):
     @torch.no_grad()
     def forward(self, images: List[Image]) -> List[torch.Tensor]:
         """forward."""
-        # assert len(images) == 1, 'not support multi images'
         outputs = [x.convert('RGB') for x in images]
         outputs = [self.image_transform(x) for x in outputs]
         outputs = torch.stack(outputs, dim=0).to(self.device).to(self.dtype)
