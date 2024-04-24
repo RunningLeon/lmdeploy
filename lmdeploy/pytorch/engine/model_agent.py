@@ -2,7 +2,7 @@
 import asyncio
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Literal
 
 import torch
 import torch.distributed as dist
@@ -130,12 +130,17 @@ class ModelInputs:
     input_embeddings: List[torch.Tensor] = None
     input_embedding_ranges: torch.LongTensor = None
     token_type_ids: torch.Tensor = None
+    position_ids: torch.LongTensor = None
+    history_position_lengths: torch.LongTensor = None
 
     def update(self, input_ids: torch.LongTensor):
         """update input ids."""
         assert self.is_decoding
         self.history_lengths = self.history_lengths + 1
         self.max_history_length = self.max_history_length + 1
+        if self.history_position_lengths is not None:
+            self.history_position_lengths = self.history_position_lengths + 1
+
         if input_ids.dim() == 1:
             input_ids = input_ids[None, :]
         self.input_ids = input_ids
@@ -196,7 +201,7 @@ class ModelInputs:
         for k, v in input_dict.items():
             if isinstance(v, torch.Tensor):
                 v = v.to(device)
-            elif isinstance(v, List) and len(v) > 0 and isinstance(v[0], torch.Tensor()):
+            elif isinstance(v, List) and len(v) > 0 and isinstance(v[0], torch.Tensor):
                 v = [_.to(device) for _ in v]
             out_dict[k] = v
 
@@ -229,6 +234,7 @@ class StepContext:
     global_adapter_ids: torch.LongTensor = None
     adapter_offsets: torch.LongTensor = None
     max_rank: int = 0
+    history_position_lengths: torch.LongTensor = None
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -251,7 +257,10 @@ class StepContext:
         """
         q_seq_length = inputs.seq_length
         max_q_seq_length = inputs.max_q_seq_length
-        history_lengths = inputs.history_lengths
+        history_position_lengths = inputs.history_lengths
+        if inputs.history_position_lengths is not None:
+            history_position_lengths = inputs.history_position_lengths
+
         batch_size = len(q_seq_length)
         device = q_seq_length.device
 
@@ -259,20 +268,23 @@ class StepContext:
         if inputs.is_decoding:
             q_start_loc = torch.arange(0, batch_size, device=device)
             attention_mask = torch.ones_like(q_seq_length)[:, None]
-            position_ids = history_lengths.unsqueeze(-1)
+            position_ids = history_position_lengths.unsqueeze(-1)
         else:
             q_start_loc = q_seq_length.cumsum(0) - q_seq_length
             mask_range = torch.arange(max_q_seq_length, device=device)[None, :]
             attention_mask = (mask_range < q_seq_length[:, None]).long()
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids += history_lengths.unsqueeze(-1)
-
+            if inputs.position_ids is None:
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids += history_position_lengths.unsqueeze(-1)
+            else:
+                position_ids = inputs.position_ids
+            
         # position ids 1d
         position_ids_1d = cls.get_position_ids_1d(position_ids, q_seq_length,
                                                   device)
 
         # seq_len + history_length
-        kv_seq_length = q_seq_length + history_lengths
+        kv_seq_length = q_seq_length + inputs.history_lengths
         max_kv_seq_length = max_q_seq_length + inputs.max_history_length
 
         window_size = getattr(cache_config, 'window_size', 0)
@@ -286,6 +298,7 @@ class StepContext:
                           attention_mask=attention_mask,
                           q_start_loc=q_start_loc,
                           history_lengths=inputs.history_lengths,
+                          history_position_lengths=inputs.history_position_lengths,
                           q_seq_length=inputs.seq_length,
                           kv_seq_length=kv_seq_length,
                           max_q_seq_length=max_q_seq_length,
@@ -306,6 +319,9 @@ class StepContext:
                             seq_length: torch.LongTensor,
                             device: str = 'cuda'):
         """get 1d position_ids."""
+        if position_ids.ndim == 1:
+            return position_ids
+        
         if position_ids.size(1) == 1:
             position_ids_1d = position_ids.flatten()
         else:
@@ -350,15 +366,17 @@ def model_forward(
     json_config: dict = None,
     world_size: int = 1,
     stream: torch.cuda.Stream = None,
+    task_type: Literal['llm', 'vlm'] = 'llm'
 ):
     """perform model forward."""
-    is_vlm = json_config['architectures'][0] in ['CogVLMForCausalLM']
     extra_kwargs = {}
-    if is_vlm:
+    if task_type == 'vlm' and not inputs.is_decoding:
         extra_kwargs.update(dict(
             input_embeddings=inputs.input_embeddings,
             input_embedding_ranges=inputs.input_embedding_ranges,
-            token_type_ids=inputs.token_type_ids))
+            ))
+        if inputs.token_type_ids is not None:
+            extra_kwargs['token_type_ids'] = inputs.token_type_ids
 
     stream = stream or torch.cuda.current_stream()
     with torch.inference_mode(), torch.cuda.stream(stream):
@@ -572,6 +590,7 @@ class BaseModelAgent(AutoModelAgent):
             self.model_config.json_config,
             world_size=1,
             stream=self.stream,
+            task_type=self.model_config.task_type
         )
         return output
 
@@ -867,6 +886,7 @@ def _tp_model_loop(
             model_config.json_config,
             world_size=world_size,
             stream=stream,
+            task_type=model_config.task_type
         )
 
 
@@ -1075,6 +1095,7 @@ class TPModelAgent(AutoModelAgent):
             self.model_config.json_config,
             world_size=1,
             stream=self.stream,
+            task_type=self.model_config.task_type
         )
         return output
 

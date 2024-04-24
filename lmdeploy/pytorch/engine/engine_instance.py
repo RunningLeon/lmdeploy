@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import List
 
+import numpy as np
 from lmdeploy.messages import EngineGenerationConfig
 from lmdeploy.utils import get_logger
 
@@ -120,7 +121,8 @@ class EngineInstance:
                                  input_ids: List[int],
                                  gen_config: EngineGenerationConfig = None,
                                  adapter_name: str = None,
-                                 input_embeddings: List[InputEmbeddings]=None,
+                                 input_embeddings: List[np.ndarray]=None,
+                                 input_embedding_ranges: List[List[int]]=None,
                                  **kwargs):
         """Send stream inference request.
 
@@ -138,12 +140,16 @@ class EngineInstance:
         gen_config = gen_config or EngineGenerationConfig()
         sampling_param = SamplingParam.from_gen_config(gen_config=gen_config)
         await async_try_add_session(self.req_sender, session_id)
+        input_embeddings_new = None
+        if input_embeddings is not None and len(input_embeddings) > 0:
+            assert len(input_embeddings) == len(input_embedding_ranges)
+            input_embeddings_new = [InputEmbeddings(emb, rg[0], rg[1]) for emb, rg in zip(input_embeddings, input_embedding_ranges)]
         msg = dict(
             token_ids=input_ids,
             session_id=session_id,
             sampling_param=sampling_param,
             adapter_name=adapter_name,
-            input_embeddings=input_embeddings
+            input_embeddings=input_embeddings_new
         )
         req_id = await self.req_sender.async_send_async(
             RequestType.ADD_MESSAGE, msg)
@@ -173,7 +179,8 @@ class EngineInstance:
                           session_id: int,
                           input_ids: List[int] = None,
                           gen_config: EngineGenerationConfig = None,
-                          input_embeddings: List[InputEmbeddings]=None,
+                          input_embeddings: List[np.ndarray]=None,
+                          input_embedding_ranges: List[List[int]]=None,
                           **kwargs):
         """Send inference request.
 
@@ -192,6 +199,7 @@ class EngineInstance:
                                                      input_ids,
                                                      gen_config=gen_config,
                                                     input_embeddings=input_embeddings,
+                                                    input_embedding_ranges=input_embedding_ranges,
                                                      **kwargs):
             status, tmp_ids, _ = outputs
             if status not in [ResponseType.SUCCESS, ResponseType.FINISH]:
@@ -205,7 +213,8 @@ class EngineInstance:
                      input_ids: List[int],
                      gen_config: EngineGenerationConfig = None,
                      adapter_name: str = None,
-                     input_embeddings: List[InputEmbeddings]=None,
+                     input_embeddings: List[np.ndarray]=None,
+                     input_embedding_ranges: List[List[int]]=None,
                      **kwargs):
         """Send stream inference request.
 
@@ -226,6 +235,7 @@ class EngineInstance:
             coro_gen = self.async_stream_infer(session_id, input_ids,
                                                gen_config, adapter_name,
                                                input_embeddings=input_embeddings,
+                                               input_embedding_ranges=input_embedding_ranges,
                                                **kwargs)
             while True:
                 try:
@@ -241,12 +251,16 @@ class EngineInstance:
         gen_config = gen_config or EngineGenerationConfig()
         sampling_param = SamplingParam.from_gen_config(gen_config=gen_config)
         try_add_session(self.req_sender, session_id)
+        input_embeddings_new = None
+        if input_embeddings is not None and len(input_embeddings) > 0:
+            assert len(input_embeddings) == len(input_embedding_ranges)
+            input_embeddings_new = [InputEmbeddings(emb, rg[0], rg[1]) for emb, rg in zip(input_embeddings, input_embedding_ranges)]
         msg = dict(
             token_ids=input_ids,
             session_id=session_id,
             sampling_param=sampling_param,
             adapter_name=adapter_name,
-            input_embeddings=input_embeddings,
+            input_embeddings=input_embeddings_new,
         )
         req_id = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
 
@@ -275,6 +289,8 @@ class EngineInstance:
               session_id: int,
               input_ids: List[int] = None,
               gen_config: EngineGenerationConfig = None,
+              input_embeddings: List[np.ndarray]=None,
+              input_embedding_ranges: List[List[int]]=None,
               **kwargs):
         """Send inference request.
 
@@ -292,6 +308,8 @@ class EngineInstance:
         for outputs in self.stream_infer(session_id,
                                          input_ids,
                                          gen_config=gen_config,
+                                         input_embeddings=input_embeddings,
+                                         input_embedding_ranges=input_embedding_ranges,
                                          **kwargs):
             status, tmp_ids, _ = outputs
             if status not in [ResponseType.SUCCESS, ResponseType.FINISH]:
@@ -306,7 +324,8 @@ class EngineInstance:
                                   gen_config: EngineGenerationConfig = None,
                                   adapter_names: List[str] = None,
                                   keep_cache: bool = False,
-                                  input_embeddings: List[List[InputEmbeddings]]=None,
+                                  input_embeddings: List[List[np.ndarray]]=None,
+                                  input_embedding_ranges: List[List[List[int]]]=None,
                                   ):
         """Send inference request.
 
@@ -331,8 +350,10 @@ class EngineInstance:
 
         if input_embeddings is not None:
             assert len(input_embeddings) == batch_size
+            assert len(input_embedding_ranges) == batch_size
         else:
             input_embeddings = [None] * batch_size
+            input_embedding_ranges = [None] * batch_size
 
         async def _add_sessions(session_ids):
             for session_id in session_ids:
@@ -341,13 +362,18 @@ class EngineInstance:
         async def _add_messages(session_ids, token_ids, input_embeddings):
             add_msgs = []
             sampling_param = SamplingParam.from_gen_config(gen_config)
-            for session_id, token_id, adapter_name, input_emb in zip(
-                    session_ids, token_ids, adapter_names, input_embeddings):
+            for session_id, token_id, adapter_name, input_emb, input_ranges in zip(
+                    session_ids, token_ids, adapter_names, input_embeddings, input_embedding_ranges):
+                cur_input_embeddings = None
+                if input_emb is not None and len(input_emb) > 0:
+                    assert len(input_emb) == len(input_ranges)
+                    # TODO valid if ok
+                    cur_input_embeddings = [InputEmbeddings(emb, rg[0], rg[1]) for emb, rg in zip(input_emb, input_ranges)]
                 msg = dict(token_ids=token_id,
                            session_id=session_id,
                            sampling_param=sampling_param,
                            adapter_name=adapter_name,
-                           input_embeddings=input_emb,
+                           input_embeddings=cur_input_embeddings,
                            )
                 add_msgs.append(msg)
             req_types = [RequestType.ADD_MESSAGE] * batch_size
@@ -356,7 +382,7 @@ class EngineInstance:
             return req_ids
 
         await _add_sessions(session_ids)
-        req_ids = await _add_messages(session_ids, token_ids, input_embeddings)
+        req_ids = await _add_messages(session_ids, token_ids, input_embeddings, input_embedding_ranges)
 
         # receive messages
         req_idx_map = dict(zip(req_ids, range(len(req_ids))))
@@ -396,7 +422,8 @@ class EngineInstance:
                       gen_config: EngineGenerationConfig = None,
                       adapter_names: List[str] = None,
                       keep_cache: bool = False,
-                      input_embeddings: List[InputEmbeddings]=None,
+                      input_embeddings: List[List[np.ndarray]]=None,
+                      input_embedding_ranges: List[List[List[int]]]=None,
                       ):
         """batched infer."""
         coro = self.async_batched_infer(session_ids,
@@ -404,6 +431,7 @@ class EngineInstance:
                                         gen_config=gen_config,
                                         adapter_names=adapter_names,
                                         input_embeddings=input_embeddings,
+                                        input_embedding_ranges=input_embedding_ranges,
                                         keep_cache=keep_cache)
         return self.req_sender.run_until_complete(coro)
 

@@ -22,6 +22,11 @@ class InputEmbeddings:
     start: int
     end: int
 
+    def move_position(self, offset: int = 0):
+        if offset !=0:
+            self.start += offset
+            self.end += offset
+        return self
 
 @dataclass
 class SamplingParam:
@@ -264,9 +269,9 @@ class HistoryEmbeddings:
         if embeddings is not None:
             self._embeddings.extend(embeddings)
 
-    def append(self, embeddings: List[InputEmbeddings], offset: int=0):
-        for emb in embeddings:
-            self._embeddings.append(InputEmbeddings(emb.embeddings, emb.start+offset, emb.end+offset))
+    def append(self, embeddings: List[InputEmbeddings]):
+        self._embeddings.extend(embeddings)
+
 
     def clone(self):
         ret = HistoryEmbeddings(self._embeddings)
@@ -275,11 +280,12 @@ class HistoryEmbeddings:
     def copy(self):
         return self.clone()
 
-    def get_embeddings(self, start: int=None, end: int=None):
-        if start is None:
-            start = 0
+    def get_embeddings(self, start: int=0, end: int=None):
         out_embeddings: List[InputEmbeddings] = []
-
+        assert start >=0
+        if end is not None and start >= end:
+            return out_embeddings
+        
         for emb in self._embeddings:
             if start < emb.end:
                 new_start = max(start, emb.start)
@@ -290,6 +296,11 @@ class HistoryEmbeddings:
                     break
 
         return out_embeddings
+    
+    @property
+    def embeddings(self):
+        """embeddings"""
+        return self._embeddings
 
 
 class HistoryTokenIds:
@@ -373,7 +384,9 @@ class SchedulerSequence:
     def __post_init__(self):
         """post init."""
         self._num_history_ids: int = 0
+        self._history_len_offset = 0 
         self._num_token_ids: int = len(self.history_cache)
+        self._input_embeddings: List[InputEmbeddings] = self.history_embeddings.embeddings
 
     @property
     def block_size(self) -> int:
@@ -386,9 +399,9 @@ class SchedulerSequence:
         return self._num_history_ids
     
     @property
-    def history_position_id_max(self) -> int:
-        pass
-    
+    def history_len_offset(self) -> int:
+        """get history length offset for cogvlm."""
+        return self._history_len_offset
 
     @property
     def session_id(self) -> int:
@@ -405,9 +418,7 @@ class SchedulerSequence:
     @property
     def input_embeddings(self) -> List[InputEmbeddings]:
         "get current embeddings"
-        start = self.history_len
-        end = start + self._num_token_ids
-        return self.history_embeddings.get_embeddings(start, end)
+        return self._input_embeddings
 
     @property
     def history_ids(self) -> np.ndarray:
@@ -459,8 +470,15 @@ class SchedulerSequence:
     def update_token_ids(self, token_ids: Tensor, embeddings: List[InputEmbeddings]=None):
         """Update token ids, old token ids will be added to history."""
         self._num_history_ids += self._num_token_ids
+        # update history len offset for cogvlm
+        for emb in self._input_embeddings:
+            self._history_len_offset += emb.end - emb.start - 3
+
+        self._input_embeddings = []
         if embeddings is not None:
-            self.history_embeddings.append(embeddings, offset=self._num_history_ids)
+            new_embeddings = [emb.move_position(self._num_history_ids) for emb in embeddings]
+            self._input_embeddings = new_embeddings
+            self.history_embeddings.append(new_embeddings)
 
         if isinstance(token_ids, Tensor):
             token_ids = token_ids.numpy()

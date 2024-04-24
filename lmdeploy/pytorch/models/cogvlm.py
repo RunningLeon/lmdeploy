@@ -83,7 +83,7 @@ class PatchedVisionExpertAttention(nn.Module):
         def __rotary_emb_fn(query_states, key_states, value_states):
             """rotary embedding func."""
             cos, sin = self.rotary_emb(value_states,
-                                        seq_len=max_kv_seq_length) # TODO: this should be position_ids.max()
+                                        seq_len=max_kv_seq_length)
             query_states, key_states = apply_rotary_pos_emb(query_states, 
                                                                       key_states, 
                                                                       cos.squeeze(1), 
@@ -222,8 +222,8 @@ class PatchedCogVLMModel(nn.Module):
     def forward(
             self,
             input_ids: torch.LongTensor = None,
-            vision_embeddings: List[torch.Tensor]=None,
-            vision_embedding_ranges = None,
+            vision_embeddings: Optional[List[torch.Tensor]]=None,
+            vision_embedding_ranges: Optional[torch.LongTensor] = None,
             token_type_ids: Optional[torch.LongTensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -231,19 +231,12 @@ class PatchedCogVLMModel(nn.Module):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         # not allow for inputs_embeds, because we want to process image feature
         assert input_ids is not None
-        # print(f'vision_embeddings={vision_embeddings}')
-        # print(f'vision_embedding_ranges={vision_embedding_ranges}')
-        # TODO support vision inputs
-        vision_embeddings = None
-        vision_embedding_ranges = None
         inputs_embeds = self.embed_tokens(input_ids)
-        if vision_embeddings is not None:  # multi-modality
+        if vision_embeddings is not None and len(vision_embeddings) > 0:  # multi-modality
             assert token_type_ids is not None, f"multi-modality requires `token_type_ids`!"
-            num_image = len(vision_embeddings)
-            vision_embeddings = torch.tensor(vision_embeddings, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-            vision_embeddings = vision_embeddings.view(num_image, -1, inputs_embeds.shape[-1])
-            vision_embeddings = vision_embeddings.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-            inputs_embeds = inputs_embeds.index_put([token_type_ids == VISION_TOKEN_TYPE], vision_embeddings)
+            assert len(vision_embeddings) == len(vision_embedding_ranges)
+            for emb, ranges in zip(vision_embeddings, vision_embedding_ranges):
+                inputs_embeds[0, ranges[0]:ranges[1]] = emb.to(inputs_embeds)
         else:
             if token_type_ids is None:
                 token_type_ids = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device) * LANGUAGE_TOKEN_TYPE
@@ -274,8 +267,8 @@ class PatchedCogVLMForCausalLM(nn.Module):
     def forward(
             self,
             input_ids: torch.LongTensor = None,
-            vision_embeddings: List[torch.Tensor]=None,
-            vision_embedding_ranges = None,
+            input_embeddings: Optional[List[torch.Tensor]]=None,
+            input_embedding_ranges: Optional[torch.LongTensor] = None,
             token_type_ids: Optional[torch.LongTensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -284,8 +277,8 @@ class PatchedCogVLMForCausalLM(nn.Module):
         outputs = self.model(
             input_ids=input_ids,
             token_type_ids=token_type_ids,
-            vision_embeddings=vision_embeddings,
-            vision_embedding_ranges=vision_embedding_ranges,
+            vision_embeddings=input_embeddings,
+            vision_embedding_ranges=input_embedding_ranges,
             position_ids=position_ids,
             past_key_values=past_key_values,
         )
