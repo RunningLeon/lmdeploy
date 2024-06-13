@@ -360,7 +360,8 @@ class StepContext:
 
         # for vlm
         input_embeddings, input_embedding_indexing = None, None
-        if inputs.vision_inputs is not None:
+        if (inputs.vision_inputs is not None
+                and inputs.vision_inputs.input_embeddings is not None):
             input_embeddings, input_embedding_indexing = \
                 inputs.vision_inputs.get_inputs(history_lengths, q_seq_length)
 
@@ -654,7 +655,13 @@ class BaseModelAgent(AutoModelAgent):
         """build patched model."""
         device = 'cuda'
         with LoadNoInit():
-            hf_model = AutoModelForCausalLM.from_pretrained(
+            # TODO update after PR#1641
+            AUTO_MODEL = AutoModelForCausalLM
+            try:
+                from llava_phi import LlavaPhiForCausalLM as AUTO_MODEL
+            except ImportError:
+                pass
+            hf_model = AUTO_MODEL.from_pretrained(
                 model_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
