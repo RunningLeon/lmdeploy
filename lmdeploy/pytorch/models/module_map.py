@@ -296,17 +296,3 @@ MODULE_MAP.update({
     'transformers.models.llava_next.modeling_llava_next.LlavaNextForConditionalGeneration':  # noqa: E501
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava.PatchedLlavaForConditionalGeneration'
 })
-
-# llava_phi from video streaming
-MODULE_MAP.update({
-    'modeling_phi.MLP':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava_phi.PatchedMLP',
-    'modeling_phi.MHA':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava_phi.PatchedMHA',
-    'modeling_phi.PhiModel':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava_phi.PatchedPhiModel',
-    'llava_phi.LlavaPhiModel':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava_phi.PatchedPhiModel',
-    'llava_phi.LlavaPhiForCausalLM':
-    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llava_phi.PatchedLlavaPhiForCausalLM',
-})
