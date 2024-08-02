@@ -79,18 +79,20 @@ jobs:
         run: |
           echo $TAG
           docker build . -f docker/Dockerfile -t ${TAG} --build-arg CUDA_VERSION=${CUDA_VERSION}
-          docker push $TAG
+          export RELEASE_TAG=${TAG_PREFIX}:test-${CUDA_VERSION}
+          docker tag $TAG $RELEASE_TAG
+          docker push $RELEASE_TAG
       - name: Push docker image latest-cu12 as latest
         if: endsWith(env.TAG, 'latest-cu12') == true
         run: |
           export latest_TAG=${TAG_PREFIX}:latest
           echo $latest_TAG
           docker tag $TAG $latest_TAG
-          docker push $latest_TAG
+          #docker push $latest_TAG
       - name: Push docker image with released tag
         if: startsWith(github.ref, 'refs/tags/') == true
         run: |
           export RELEASE_TAG=${TAG_PREFIX}:${{github.ref_name}}-${CUDA_VERSION}
           echo $RELEASE_TAG
           docker tag $TAG $RELEASE_TAG
-          docker push $RELEASE_TAG
+          #docker push $RELEASE_TAG

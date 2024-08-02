@@ -36,7 +36,6 @@ ENV NCCL_LAUNCH_MODE=GROUP
 
 # Should be in the lmdeploy root directory when building docker image
 COPY . /opt/lmdeploy
-
 WORKDIR /opt/lmdeploy
 
 RUN cd /opt/lmdeploy &&\
