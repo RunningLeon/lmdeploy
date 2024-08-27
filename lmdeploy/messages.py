@@ -15,6 +15,26 @@ to sample from."""
 
 
 @dataclass
+class LongCacheConfig:
+    """LongCache Config for long context inference.
+
+    Args:
+        global_size (int): First number of tokens to choose
+        middle_size (int): Middle size to do topk
+        local_size (int): Last number of tokens to choose
+        span_size (int): Span size of middle recall
+        unique_option (str): unique method
+        recall_clip (int): max number tokens in middle recall
+    """
+    global_size: int = 32
+    middle_size: int = 1
+    local_size: int = 8192
+    span_size: int = 32
+    unique_option: Literal['group_unique', 'head_unique'] = 'head_unique'
+    recall_clip: int = 256
+
+
+@dataclass
 class GenerationConfig:
     """generation parameters used by inference engines.
 
@@ -199,6 +219,8 @@ class PytorchEngineConfig:
         revision (str): The specific model version to use.
             It can be a branch name, a tag name, or a commit id.
             If unspecified, will use the default version.
+        longcontext_cfg (str): Choose which long context method to enable.
+            Default is None.
     """
     tp: int = 1
     session_len: int = None
@@ -215,6 +237,7 @@ class PytorchEngineConfig:
     device_type: str = 'cuda'
     download_dir: str = None
     revision: str = None
+    longcontext_cfg: LongCacheConfig = None
 
     def __post_init__(self):
         """Check input validation."""

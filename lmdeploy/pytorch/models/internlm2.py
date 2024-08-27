@@ -7,6 +7,8 @@ from einops import rearrange
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
+from lmdeploy.messages import LongCacheConfig
+
 from ..kernels import apply_rotary_pos_emb, fill_kv_cache, paged_attention_fwd
 from ..weight_loader.dist_utils import (colwise_parallelize_linear,
                                         rowwise_parallelize_linear)
@@ -56,8 +58,9 @@ class PatchedInternLM2Attention(nn.Module):
         kv_seq_length = context.kv_seq_length
         block_offsets = context.block_offsets
         max_q_seq_length = context.max_q_seq_length
-        position_ids_1d = context.position_ids_1d
         max_kv_seq_length = context.max_kv_seq_length
+        position_ids_1d = context.position_ids_1d
+        longcontext_cfg = context.longcontext_cfg
 
         def __qkv_proj(hidden_states):
             """qkv_proj."""
@@ -115,26 +118,48 @@ class PatchedInternLM2Attention(nn.Module):
 
         query_states, key_states, value_states = __qkv_proj(hidden_states)
 
-        query_states, key_states, value_states = __rotary_emb_fn(
-            query_states, key_states, value_states)
+        # longcache
+        if isinstance(longcontext_cfg, LongCacheConfig):
+            from .longcache import apply_longcache_on_kv_cache
+            fill_kv_cache(
+                key_states,
+                value_states,
+                past_key_value[0],
+                past_key_value[1],
+                q_start_loc,
+                q_seq_length,
+                kv_seq_length=kv_seq_length,
+                max_q_seq_length=max_q_seq_length,
+                block_offsets=block_offsets,
+            )
+            (past_key_cache, past_value_cache, kv_seq_length,
+             block_offsets) = apply_longcache_on_kv_cache(
+                 query_states, key_states, past_key_value, self.rotary_emb,
+                 context)
 
-        fill_kv_cache(
-            key_states,
-            value_states,
-            past_key_value[0],
-            past_key_value[1],
-            q_start_loc,
-            q_seq_length,
-            kv_seq_length=kv_seq_length,
-            max_q_seq_length=max_q_seq_length,
-            block_offsets=block_offsets,
-        )
+        else:
+            query_states, key_states, value_states = __rotary_emb_fn(
+                query_states, key_states, value_states)
+
+            fill_kv_cache(
+                key_states,
+                value_states,
+                past_key_value[0],
+                past_key_value[1],
+                q_start_loc,
+                q_seq_length,
+                kv_seq_length=kv_seq_length,
+                max_q_seq_length=max_q_seq_length,
+                block_offsets=block_offsets,
+            )
+            past_key_cache = past_key_value[0]
+            past_value_cache = past_key_value[1]
 
         attn_output = query_states
         paged_attention_fwd(
             query_states,
-            past_key_value[0],
-            past_key_value[1],
+            past_key_cache,
+            past_value_cache,
             attn_output,
             block_offsets,
             q_start_loc=q_start_loc,
@@ -391,7 +416,6 @@ class PatchedInternLM2Model(nn.Module):
             inputs_embeds[:,
                           vision_embedding_indexing, :] = vision_embeddings.to(
                               inputs_embeds)
-
         # Attention mask is not necessary in continuous batching
         attention_mask = None
         hidden_states = inputs_embeds

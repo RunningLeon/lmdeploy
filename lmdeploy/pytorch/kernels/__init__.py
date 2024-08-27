@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .alibi_pagedattention import alibi_paged_attention_fwd
-from .apply_rotary_pos_emb import apply_rotary_pos_emb
+from .apply_rotary_pos_emb import (apply_rotary_pos_emb,
+                                   apply_rotary_pos_emb_longcache)
 from .fill_kv_cache import fill_kv_cache
 from .fused_moe import fused_moe
 from .fused_rotary_emb import fused_rotary_emb
@@ -16,6 +17,7 @@ from .w8a8_triton_kernels import (matmul_kernel_dynamic_quant,
 
 __all__ = [
     'apply_rotary_pos_emb',
+    'apply_rotary_pos_emb_longcache',
     'fused_moe',
     'fused_rotary_emb',
     'paged_attention_fwd',

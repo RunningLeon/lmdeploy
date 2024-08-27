@@ -351,6 +351,7 @@ class StepContext:
     adapter_params: Dict[str, AdapterInfo] = None
     input_embeddings: torch.Tensor = None
     input_embedding_indexing: torch.Tensor = None
+    longcontext_cfg: Dict = None
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -428,7 +429,9 @@ class StepContext:
                           is_decoding=inputs.is_decoding,
                           world_size=world_size,
                           local_adapter_ids=inputs.local_adapter_ids,
-                          adapter_params=adapter_params)
+                          adapter_params=adapter_params,
+                          longcontext_cfg=getattr(cache_config,
+                                                  'longcontext_cfg', None))
 
         ret = get_current_device_utils().update_step_context(ret)
         return ret
