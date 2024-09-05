@@ -9,82 +9,6 @@ from .triton_utils import get_kernel_meta, wrap_jit_func
 
 @wrap_jit_func(type_hint=dict(
     Q=Tensor,
-    COS=Tensor,
-    SIN=Tensor,
-    POS=Tensor,
-    Q_EMB=Tensor,
-    seq_len=int,
-    stride_qs=int,
-    stride_qh=int,
-    stride_qd=int,
-    stride_qes=int,
-    stride_qeh=int,
-    stride_qed=int,
-    half_size=torch.int32,
-    BLOCK=torch.int32,
-    BLOCK_QH=torch.int32,
-    BLOCK_N=torch.int32,
-))
-@triton.jit
-def _apply_rotary_pos_emb_single_kernel(
-    Q,
-    COS,
-    SIN,
-    POS,
-    Q_EMB,
-    seq_len,
-    stride_qs: tl.constexpr,
-    stride_qh: tl.constexpr,
-    stride_qd: tl.constexpr,
-    stride_qes: tl.constexpr,
-    stride_qeh: tl.constexpr,
-    stride_qed: tl.constexpr,
-    half_size: tl.constexpr,
-    BLOCK: tl.constexpr,
-    BLOCK_QH: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-):
-    """apply rotary on key OR query kernel."""
-    seq_block_id = tl.program_id(0)
-
-    pos_offset = seq_block_id * BLOCK + tl.arange(0, BLOCK)
-    pos_ids = tl.load(POS + pos_offset, pos_offset < seq_len, other=-1)
-
-    feat_size = half_size * 2
-    feat_offset_l = tl.arange(0, BLOCK_N)
-    feat_offset_h = half_size + feat_offset_l
-    seq_mask = (pos_offset < seq_len)[:, None] & (feat_offset_l <
-                                                  half_size)[None, :]
-    cs_offset_l = pos_ids[:, None] * feat_size + feat_offset_l[None, :]
-    cs_offset_h = pos_ids[:, None] * feat_size + feat_offset_h[None, :]
-    pos_ids_mask = pos_ids[:, None] >= 0
-    cos_l = tl.load(COS + cs_offset_l, mask=pos_ids_mask)
-    cos_h = tl.load(COS + cs_offset_h, mask=pos_ids_mask)
-    sin_l = tl.load(SIN + cs_offset_l, mask=pos_ids_mask)
-    sin_h = tl.load(SIN + cs_offset_h, mask=pos_ids_mask)
-
-    q_ptr = Q + pos_offset * stride_qs
-    qe_ptr = Q_EMB + pos_offset * stride_qes
-    for hidx in range(BLOCK_QH):
-        qh_ptr = q_ptr[:, None] + hidx * stride_qh
-        q_l = tl.load(qh_ptr + feat_offset_l[None, :] * stride_qd,
-                      mask=seq_mask)
-        q_h = tl.load(qh_ptr + feat_offset_h[None, :] * stride_qd,
-                      mask=seq_mask)
-        qe_l = q_l * cos_l - q_h * sin_l
-        qe_h = q_h * cos_h + q_l * sin_h
-
-        qeh_ptr = qe_ptr[:, None] + hidx * stride_qeh
-        tl.store(qeh_ptr + feat_offset_l[None, :] * stride_qed,
-                 qe_l,
-                 mask=seq_mask)
-        tl.store(qeh_ptr + feat_offset_h[None, :] * stride_qed,
-                 qe_h,
-                 mask=seq_mask)
-
-
-@wrap_jit_func(type_hint=dict(
-    Q=Tensor,
     K=Tensor,
     COS=Tensor,
     SIN=Tensor,
@@ -276,6 +200,82 @@ def apply_rotary_pos_emb(q: Tensor,
     return q_embed, k_embed
 
 
+@wrap_jit_func(type_hint=dict(
+    Q=Tensor,
+    COS=Tensor,
+    SIN=Tensor,
+    POS=Tensor,
+    Q_EMB=Tensor,
+    seq_len=int,
+    stride_qs=int,
+    stride_qh=int,
+    stride_qd=int,
+    stride_qes=int,
+    stride_qeh=int,
+    stride_qed=int,
+    half_size=torch.int32,
+    BLOCK=torch.int32,
+    BLOCK_QH=torch.int32,
+    BLOCK_N=torch.int32,
+))
+@triton.jit
+def _apply_rotary_pos_emb_single_kernel(
+    Q,
+    COS,
+    SIN,
+    POS,
+    Q_EMB,
+    seq_len,
+    stride_qs: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_qes: tl.constexpr,
+    stride_qeh: tl.constexpr,
+    stride_qed: tl.constexpr,
+    half_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+    BLOCK_QH: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """apply rotary on key OR query kernel."""
+    seq_block_id = tl.program_id(0)
+
+    pos_offset = seq_block_id * BLOCK + tl.arange(0, BLOCK)
+    pos_ids = tl.load(POS + pos_offset, pos_offset < seq_len, other=-1)
+
+    feat_size = half_size * 2
+    feat_offset_l = tl.arange(0, BLOCK_N)
+    feat_offset_h = half_size + feat_offset_l
+    seq_mask = (pos_offset < seq_len)[:, None] & (feat_offset_l <
+                                                  half_size)[None, :]
+    cs_offset_l = pos_ids[:, None] * feat_size + feat_offset_l[None, :]
+    cs_offset_h = pos_ids[:, None] * feat_size + feat_offset_h[None, :]
+    pos_ids_mask = pos_ids[:, None] >= 0
+    cos_l = tl.load(COS + cs_offset_l, mask=pos_ids_mask)
+    cos_h = tl.load(COS + cs_offset_h, mask=pos_ids_mask)
+    sin_l = tl.load(SIN + cs_offset_l, mask=pos_ids_mask)
+    sin_h = tl.load(SIN + cs_offset_h, mask=pos_ids_mask)
+
+    q_ptr = Q + pos_offset * stride_qs
+    qe_ptr = Q_EMB + pos_offset * stride_qes
+    for hidx in range(BLOCK_QH):
+        qh_ptr = q_ptr[:, None] + hidx * stride_qh
+        q_l = tl.load(qh_ptr + feat_offset_l[None, :] * stride_qd,
+                      mask=seq_mask)
+        q_h = tl.load(qh_ptr + feat_offset_h[None, :] * stride_qd,
+                      mask=seq_mask)
+        qe_l = q_l * cos_l - q_h * sin_l
+        qe_h = q_h * cos_h + q_l * sin_h
+
+        qeh_ptr = qe_ptr[:, None] + hidx * stride_qeh
+        tl.store(qeh_ptr + feat_offset_l[None, :] * stride_qed,
+                 qe_l,
+                 mask=seq_mask)
+        tl.store(qeh_ptr + feat_offset_h[None, :] * stride_qed,
+                 qe_h,
+                 mask=seq_mask)
+
+
 def apply_rotary_pos_emb_longcache(q: Tensor,
                                    k: Tensor,
                                    cos: Tensor,
@@ -318,9 +318,8 @@ def apply_rotary_pos_emb_longcache(q: Tensor,
     num_stages = 2
 
     kernel_meta = get_kernel_meta(q)
-    if position_ids_k is None and q.size(0) == k.size(0):
+    if position_ids_k is None:
         seq_len = q.size(0)
-        assert position_ids_q.numel() == seq_len
         grid = [triton.cdiv(seq_len, BLOCK)]
         apply_rotary_pos_emb_qk_kernel[grid](q,
                                              k,
@@ -352,7 +351,7 @@ def apply_rotary_pos_emb_longcache(q: Tensor,
                                              **kernel_meta)
     else:
         # apply on q,k separately
-        q_seq_len = position_ids_q.numel()
+        q_seq_len = position_ids_q.size(0)
         grid_q = [triton.cdiv(q_seq_len, BLOCK)]
         _apply_rotary_pos_emb_single_kernel[grid_q](
             q,

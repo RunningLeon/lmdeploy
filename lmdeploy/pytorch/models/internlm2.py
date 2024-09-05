@@ -419,7 +419,6 @@ class PatchedInternLM2Model(nn.Module):
         # Attention mask is not necessary in continuous batching
         attention_mask = None
         hidden_states = inputs_embeds
-
         # decoder layers
         for idx, decoder_layer in enumerate(self.layers):
             past_key_value = (past_key_values[idx]

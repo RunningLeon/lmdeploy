@@ -33,6 +33,12 @@ class LongCacheConfig:
     unique_option: Literal['group_unique', 'head_unique'] = 'head_unique'
     recall_clip: int = 256
 
+    @property
+    def max_kv_length(self):
+        max_len = (self.global_size + self.recall_clip * self.span_size +
+                   self.local_size)
+        return max_len
+
 
 @dataclass
 class GenerationConfig:
