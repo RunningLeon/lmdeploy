@@ -61,6 +61,30 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         self.alibi_head_offset = self.num_heads * rank
         self.alibi_num_heads = self.num_heads * world_size
 
+    def fill_kv_caches(self, query: torch.Tensor, key: torch.Tensor,
+                       value: torch.Tensor, k_cache: torch.Tensor,
+                       v_cache: torch.Tensor,
+                       attn_metadata: TritonAttentionMetadata):
+
+        block_offsets = attn_metadata.block_offsets
+        q_start_loc = attn_metadata.q_start_loc
+        q_seqlens = attn_metadata.q_seqlens
+        kv_seqlens = attn_metadata.kv_seqlens
+        max_q_seqlen = query.numel() // (query.size(-1) * query.size(-2))
+        # fill kv cache
+        self.fill_kv_cache(
+            key,
+            value,
+            k_cache,
+            v_cache,
+            q_start_loc,
+            q_seqlens,
+            kv_seq_length=kv_seqlens,
+            max_q_seq_length=max_q_seqlen,
+            block_offsets=block_offsets,
+        )
+        return k_cache, v_cache
+
     def forward(
         self,
         query: torch.Tensor,
@@ -78,19 +102,19 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         q_seqlens = attn_metadata.q_seqlens
         kv_seqlens = attn_metadata.kv_seqlens
         max_q_seqlen = query.numel() // (query.size(-1) * query.size(-2))
-
-        # fill kv cache
-        self.fill_kv_cache(
-            key,
-            value,
-            k_cache,
-            v_cache,
-            q_start_loc,
-            q_seqlens,
-            kv_seq_length=kv_seqlens,
-            max_q_seq_length=max_q_seqlen,
-            block_offsets=block_offsets,
-        )
+        if key is not None and value is not None:
+            # fill kv cache
+            self.fill_kv_cache(
+                key,
+                value,
+                k_cache,
+                v_cache,
+                q_start_loc,
+                q_seqlens,
+                kv_seq_length=kv_seqlens,
+                max_q_seq_length=max_q_seqlen,
+                block_offsets=block_offsets,
+            )
 
         if inplace:
             attn_output = query[..., :self.v_head_size]

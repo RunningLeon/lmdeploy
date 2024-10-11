@@ -35,12 +35,14 @@ class DefaultApplyRotaryEmbImpl(ApplyRotaryEmbImpl):
             q_sin = rotate_half(query) * sin
             q_embed.mul_(cos)
             q_embed.add_(q_sin)
-            k_sin = rotate_half(key) * sin
-            k_embed.mul_(cos)
-            k_embed.add_(k_sin)
+            if key is not None:
+                k_sin = rotate_half(key) * sin
+                k_embed.mul_(cos)
+                k_embed.add_(k_sin)
         else:
             q_embed = (query * cos) + (rotate_half(query) * sin)
-            k_embed = (key * cos) + (rotate_half(key) * sin)
+            k_embed = (key * cos) + (rotate_half(key) *
+                                     sin) if key is not None else key
         return q_embed, k_embed
 
 

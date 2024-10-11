@@ -49,6 +49,15 @@ class AscendAttentionImpl(AttentionImpl[AscendAttentionMetadata]):
         self.fill_kv_cache = fill_kv_cache
         self.paged_attention_fwd = paged_attention_fwd
 
+    def fill_kv_caches(self, query: Tensor, key: Tensor, value: Tensor,
+                       k_cache: Tensor, v_cache: Tensor,
+                       attn_metadata: AscendAttentionMetadata):
+
+        kv_start_indices = attn_metadata.kv_start_indices
+        k_cache, v_cache = self.fill_kv_cache(key, value, k_cache, v_cache,
+                                              kv_start_indices)
+        return k_cache, v_cache
+
     def forward(
         self,
         query: Tensor,
@@ -74,8 +83,9 @@ class AscendAttentionImpl(AttentionImpl[AscendAttentionMetadata]):
         max_kv_seq_len = attn_metadata.max_kv_seq_len
 
         # fill kv cache
-        k_cache, v_cache = self.fill_kv_cache(key, value, k_cache, v_cache,
-                                              kv_start_indices)
+        if key is not None and value is not None:
+            k_cache, v_cache = self.fill_kv_cache(key, value, k_cache, v_cache,
+                                                  kv_start_indices)
 
         if inplace:
             attn_output = query[..., :self.v_head_size]
