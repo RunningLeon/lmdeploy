@@ -29,7 +29,6 @@ class InternLM3SelfAttention(nn.Module):
         num_key_value_heads = config.num_key_value_heads
         hidden_size = config.hidden_size
         head_dim = hidden_size // num_heads
-
         # packed qkv
         self.wqkv = build_qkv_proj(
             hidden_size,
@@ -353,14 +352,12 @@ class InternLM3CrossDecoder(nn.Module):
         self.wk = build_colwise_linear(hidden_size,
                                        num_key_value_heads * head_dim,
                                        bias=config.bias,
-                                       quant_config=quantization_config,
                                        dtype=dtype,
                                        device=device,
                                        is_tp=True)
         self.wv = build_colwise_linear(hidden_size,
                                        num_key_value_heads * head_dim,
                                        bias=config.bias,
-                                       quant_config=quantization_config,
                                        dtype=dtype,
                                        device=device,
                                        is_tp=True)
