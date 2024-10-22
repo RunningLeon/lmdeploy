@@ -127,6 +127,10 @@ class CUDAGraphRunner(GraphRunner):
         """check enable graph."""
         if self.backend_config.eager_mode:
             return _false
+        # disable for vlm
+        if getattr(self.ctx_mgr.current_context(), 'input_embeddings',
+                   None) is not None:
+            return _false
 
         return getattr(self.model, 'support_cuda_graph', _false)
 
