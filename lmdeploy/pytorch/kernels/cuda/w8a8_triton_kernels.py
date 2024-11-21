@@ -32,10 +32,15 @@ def per_channel_quant(x, n_bits, dtype):
     assert x.ndim == 2
     x = x.to(torch.float32)
     x_absmax = x.view(x.shape[0], -1).abs().max(dim=1, keepdim=True)[0]
-    q_max = 2**(n_bits - 1) - 1
-    q_min = -2**(n_bits - 1)
-    scale = x_absmax / (2**(n_bits - 1) - 1)
-    x_q = torch.round(x / scale).clamp(q_min, q_max).to(dtype)
+    is_q_float = torch.is_floating_point(torch.tensor([0], dtype=dtype))
+    qtype_info = torch.finfo(dtype) if is_q_float else torch.iinfo(dtype)
+    q_max = qtype_info.max
+    q_min = qtype_info.min
+    scale = x_absmax / q_max
+    x_q = x / scale
+    if not is_q_float:
+        x_q = torch.round(x_q)
+    x_q = x_q.clamp(q_min, q_max).to(dtype)
     return x_q, scale
 
 
@@ -101,10 +106,10 @@ def _linear(
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -183,10 +188,10 @@ def _linear_add(
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -291,8 +296,10 @@ def _per_token_quant_int8(
     y_s_ptr,
     y_stride,
     N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
+    eps: tl.constexpr,  # epsilon to avoid division by zero
     BLOCK: tl.constexpr,
+    Q_MAX: tl.constexpr,
+    IS_INT: tl.constexpr,
 ):
     """A Triton-accelerated function to perform per-token quantization on a
     tensor.
@@ -311,21 +318,25 @@ def _per_token_quant_int8(
     y = tl.load(y_ptr + cols, mask=mask, other=0.).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    y_s = _absmax / 127
-    y_q = tl_round(y / y_s).to(tl.int8)
+    y_s = _absmax / Q_MAX
+    y_q = y / y_s
+    if IS_INT:
+        y_q = tl_round(y_q).to(tl.int8)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
     tl.store(y_s_ptr, y_s)
 
 
-def per_token_quant_int8(x, eps):
+def per_token_quant_int8(x, eps, qdtype=torch.int8):
     """Function to perform per-token quantization on an input tensor `x`.
 
     It converts the tensor values into signed 8-bit integers and returns the
     quantized tensor along with the scaling factor used for quantization.
     """
-
-    x_q = torch.empty_like(x, device=x.device, dtype=torch.int8)
+    is_int = qdtype == torch.int8
+    qdtype_info = torch.iinfo(qdtype) if is_int else torch.finfo(qdtype)
+    q_max = qdtype_info.max
+    x_q = torch.empty_like(x, device=x.device, dtype=qdtype)
     M = x.numel() // x.shape[-1]
     N = x.shape[-1]
     x_s = torch.empty(x.shape[:-1] + (1, ),
@@ -343,6 +354,8 @@ def per_token_quant_int8(x, eps):
                                  N,
                                  eps,
                                  BLOCK=BLOCK,
+                                 Q_MAX=q_max,
+                                 IS_INT=is_int,
                                  num_warps=num_warps,
                                  **kernel_meta)
 
@@ -357,8 +370,11 @@ def _rms_norm_fwd_fused_dynamic_symmetric(
     Scale,  # pointer to the scales of the output activation
     stride,  # how much to increase the pointer when moving by 1 row
     N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
+    eps: tl.constexpr,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr,
+    Q_MIN: tl.constexpr,
+    Q_MAX: tl.constexpr,
+    IS_INT: tl.constexpr,
 ):
     """A Triton kernel that calculates Root Mean Square (RMS) normalization
     with fused dynamic symmetric quantization."""
@@ -377,25 +393,26 @@ def _rms_norm_fwd_fused_dynamic_symmetric(
     x_hat = x * rstd
     y = x_hat * w
 
-    scale = tl.max(tl.abs(y)).to(tl.float32) / 127
+    scale = tl.max(tl.abs(y)).to(tl.float32) / Q_MAX
     tl.store(Scale + row, scale)
-
-    y = tl_round(y / scale)
-    y = tl.minimum(y, 127)
-    y = tl.maximum(y, -128)
+    y = y / scale
+    if IS_INT:
+        y = tl_round(y)
+    y = tl.clamp(y, Q_MIN, Q_MAX)
     tl.store(Y + cols, y, mask=mask)
 
 
-def rms_norm_dynamic_quant(x, w, eps):
+def rms_norm_dynamic_quant(x, w, eps, qdtype=torch.int8):
     """Performs RMS normalization with dynamic quantization.
 
     The function reshapes the input tensor `x`, creates an empty tensor `y`
     with the same shape as `x`, and calculates RMS normalization on the
     reshaped `x` using a Triton kernel `_rms_norm_fwd_fused_dynamic_symmetric`.
     """
-
+    is_int = qdtype == torch.int8
+    qdtype_info = torch.iinfo(qdtype) if is_int else torch.finfo(qdtype)
     x_arg = x.flatten(0, -2)
-    y = torch.empty_like(x, dtype=torch.int8)
+    y = torch.empty_like(x, dtype=qdtype)
     M, K = x_arg.shape
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(K))
@@ -413,6 +430,9 @@ def rms_norm_dynamic_quant(x, w, eps):
                                                  K,
                                                  eps,
                                                  BLOCK_SIZE=BLOCK_SIZE,
+                                                 Q_MIN=qdtype_info.min,
+                                                 Q_MAX=qdtype_info.max,
+                                                 IS_INT=is_int,
                                                  num_warps=num_warps,
                                                  **kernel_meta)
     return y, scale
@@ -421,7 +441,8 @@ def rms_norm_dynamic_quant(x, w, eps):
 def test_rms_and_linear(x,
                         rms_weight,
                         linear_weight,
-                        dtype=torch.float16,
+                        output_dtype=torch.float16,
+                        qdtype=torch.int8,
                         eps=1e-5):
     """Test quantized rms norm and quantized linear layer."""
 
@@ -434,15 +455,18 @@ def test_rms_and_linear(x,
         return F.linear(x, b)
 
     linear_weight_quant, linear_scale = per_channel_quant(
-        linear_weight, 8, torch.int8)
+        linear_weight, 8, qdtype)
 
-    rms_out, rms_scale = rms_norm_dynamic_quant(x, rms_weight, eps)
+    rms_out, rms_scale = rms_norm_dynamic_quant(x,
+                                                rms_weight,
+                                                eps,
+                                                qdtype=qdtype)
     assert rms_out.shape == x.shape and rms_scale.shape[:-1] == x.shape[:-1]
     linear_out = matmul_kernel_dynamic_quant(rms_out,
                                              linear_weight_quant,
                                              rms_scale,
                                              linear_scale,
-                                             output_dtype=dtype)
+                                             output_dtype=output_dtype)
 
     rms_out_torch = rms_norm_torch(x, rms_weight, eps).half()
     linear_out_torch = linear_torch(rms_out_torch, linear_weight)
@@ -456,17 +480,23 @@ def test_rms_and_linear(x,
             linear_out_torch.flatten().to(torch.float32)))
 
 
-def test_per_token_quant(x, eps):
+def test_per_token_quant(x, eps, qdtype=torch.int8):
     """Test per-token quantization."""
 
-    def per_token_quant_int8_torch(x, eps):
+    def per_token_quant_int8_torch(x, eps, qdtype):
+        is_int = qdtype == torch.int8
+        qdtype_info = torch.iinfo(qdtype) if is_int else torch.finfo(qdtype)
+
         _absmax = torch.clamp(x.abs().max(dim=-1, keepdim=True)[0], min=eps)
-        x_s = _absmax / 127
-        x_q = torch.clamp((x / x_s).round(), min=-128, max=127)
+        x_s = _absmax / qdtype_info.max
+        x_q = x / x_s
+        if is_int:
+            x_q = x_q.round()
+        x_q = torch.clamp(x_q, min=qdtype_info.min, max=qdtype_info.max)
         return x_q, x_s
 
-    x_q, x_s = per_token_quant_int8(x, eps)
-    x_q_torch, x_s_torch = per_token_quant_int8_torch(x, eps)
+    x_q, x_s = per_token_quant_int8(x, eps, qdtype=qdtype)
+    x_q_torch, x_s_torch = per_token_quant_int8_torch(x, eps, qdtype=qdtype)
     assert x_q.shape == x_q_torch.shape and x_s.shape == x_s_torch.shape
     cos = torch.nn.CosineSimilarity(0)
     print(
@@ -493,7 +523,12 @@ def test_per_token_quant(x, eps):
         args={
             'dtype': torch.float16,
         }))
-def bench_rms_and_linear(M, dtype, provider, eps=1e-5, device='cuda'):
+def bench_rms_and_linear(M,
+                         dtype,
+                         provider,
+                         eps=1e-5,
+                         device='cuda',
+                         qdtype=torch.int8):
 
     def rms_norm_torch(x, w, eps):
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
@@ -517,13 +552,18 @@ def bench_rms_and_linear(M, dtype, provider, eps=1e-5, device='cuda'):
                                 device='cuda',
                                 requires_grad=True)
     linear_weight_quant, linear_scale = per_channel_quant(
-        linear_weight, 8, torch.int8)
+        linear_weight, 8, qdtype)
 
     alpha = max(x.max().abs(), x.min().abs())
-    rms_scale = alpha / 127
+    qdtype_info = torch.iinfo(qdtype) if qdtype == torch.int8 else torch.finfo(
+        qdtype)
+    rms_scale = alpha / qdtype_info.max
 
     if provider == 'int8_dynamic_triton_op':
-        rms_out, rms_scale = rms_norm_dynamic_quant(x, rms_weight, eps)
+        rms_out, rms_scale = rms_norm_dynamic_quant(x,
+                                                    rms_weight,
+                                                    eps,
+                                                    qdtype=qdtype)
 
         def y_fwd():
 
@@ -547,6 +587,8 @@ def bench_rms_and_linear(M, dtype, provider, eps=1e-5, device='cuda'):
 
 if __name__ == '__main__':
     torch.manual_seed(0)
+    device_map = torch.cuda.get_device_capability()
+    is_fp8_supported = device_map[0] >= 9
     dtype = torch.float16
     # test (bs, seq_len, dim) x (dim, out_dim)
     x = torch.randn((2, 2048, 4096), dtype=dtype, device='cuda')
@@ -559,7 +601,16 @@ if __name__ == '__main__':
                                 dtype=dtype,
                                 device='cuda',
                                 requires_grad=True)
-    test_rms_and_linear(x, rms_weight, linear_weight)
+    test_rms_and_linear(x, rms_weight, linear_weight, qdtype=torch.int8)
+    if is_fp8_supported:
+        test_rms_and_linear(x,
+                            rms_weight,
+                            linear_weight,
+                            qdtype=torch.float8_e4m3fn)
+        test_rms_and_linear(x,
+                            rms_weight,
+                            linear_weight,
+                            qdtype=torch.float8_e5m2)
 
     # test (M, K) x (K, N)
     x = torch.randn((4, 4096), dtype=dtype, device='cuda')
@@ -572,11 +623,23 @@ if __name__ == '__main__':
                                 dtype=dtype,
                                 device='cuda',
                                 requires_grad=True)
-    test_rms_and_linear(x, rms_weight, linear_weight)
+    test_rms_and_linear(x, rms_weight, linear_weight, qdtype=torch.int8)
+    if is_fp8_supported:
+        test_rms_and_linear(x,
+                            rms_weight,
+                            linear_weight,
+                            qdtype=torch.float8_e4m3fn)
+        test_rms_and_linear(x,
+                            rms_weight,
+                            linear_weight,
+                            qdtype=torch.float8_e5m2)
 
     # test per-token quant
     x = torch.randn((4, 2048, 4096), dtype=dtype, device='cuda')
     eps = 1e-7
-    test_per_token_quant(x, eps)
+    test_per_token_quant(x, eps, qdtype=torch.int8)
+    if is_fp8_supported:
+        test_per_token_quant(x, eps, qdtype=torch.float8_e4m3fn)
+        test_per_token_quant(x, eps, qdtype=torch.float8_e5m2)
 
     bench_rms_and_linear.run(print_data=True)
