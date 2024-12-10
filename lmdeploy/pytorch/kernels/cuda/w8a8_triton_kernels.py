@@ -81,6 +81,7 @@ def _linear(
     GROUP_SIZE_M: tl.constexpr,
     rms_scale_ptr,
     linear_scale_ptr,
+    ACCUMULATOR_DTYPE: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B`, and store the result in output
@@ -105,11 +106,10 @@ def _linear(
     offs_k = tl.arange(0, BLOCK_K)
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACCUMULATOR_DTYPE)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=None)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=None)
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -144,27 +144,12 @@ def _linear(
     key=['N', 'K'],
 )
 @triton.jit
-def _linear_add(
-    A,
-    B,
-    C,
-    residual_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    rms_scale_ptr,
-    linear_scale_ptr,
-):
+def _linear_add(A, B, C, residual_ptr, M, N, K, stride_am, stride_ak,
+                stride_bk, stride_bn, stride_cm, stride_cn,
+                BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+                BLOCK_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
+                rms_scale_ptr, linear_scale_ptr,
+                ACCUMULATOR_DTYPE: tl.constexpr):
     """Triton-accelerated function used to perform a linear operation (dot
     product) on input tensors `A` and `B`, with addition of residual.
 
@@ -188,10 +173,10 @@ def _linear_add(
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACCUMULATOR_DTYPE)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=None)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=None)
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -236,7 +221,7 @@ def matmul_kernel_dynamic_quant(a,
         assert residual.shape == c_shape
         assert residual.is_contiguous()
     c = a.new_empty(c_shape, dtype=output_dtype)
-
+    accumulator_dtype = tl.float32 if a.is_floating_point() else tl.int32
     BLOCK_M = 128
     if M < BLOCK_M:
         BLOCK_M = triton.next_power_of_2(M)
@@ -264,6 +249,7 @@ def matmul_kernel_dynamic_quant(a,
                           GROUP_SIZE_M=8,
                           rms_scale_ptr=rms_scale,
                           linear_scale_ptr=linear_scale,
+                          ACCUMULATOR_DTYPE=accumulator_dtype,
                           **kernel_meta)
     else:
         _linear[grid](a,
@@ -282,6 +268,7 @@ def matmul_kernel_dynamic_quant(a,
                       GROUP_SIZE_M=8,
                       rms_scale_ptr=rms_scale,
                       linear_scale_ptr=linear_scale,
+                      ACCUMULATOR_DTYPE=accumulator_dtype,
                       **kernel_meta)
     if bias is not None:
         c += bias
