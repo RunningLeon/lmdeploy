@@ -39,6 +39,7 @@ jobs:
       options: "--gpus=all --ipc=host --user root -e PIP_CACHE_DIR=/root/.cache/pip -e CUDA_VISIBLE_DEVICES=2,3 --pull never"
       volumes:
         - /nvme/share_data/github-actions/pip-cache:/root/.cache/pip
+        - /nvme/share_data/github-actions/hf_home:/root/.cache/huggingface
         - /nvme/share_data/github-actions/packages:/root/packages
         - /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime:ro
     steps:
@@ -54,6 +55,8 @@ jobs:
         run: |
           python3 -m pip cache dir
           python3 -m pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu118
+          pip install transformers
+          huggingface-cli whoami
       - name: Build lmdeploy
         run: |
           python3 -m pip install cmake
@@ -80,6 +83,7 @@ jobs:
           python3 -m pip install /root/packages/flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp38-cp38-linux_x86_64.whl
           python3 -m pip install -r requirements_cuda.txt -r requirements/test.txt
           python3 -m pip install .
+          pytest -rsE tests/test_lmdeploy/test_auto_backend.py
       - name: Check env
         run: |
           python3 -m pip list
