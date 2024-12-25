@@ -55,6 +55,8 @@ jobs:
         run: |
           python3 -m pip cache dir
           python3 -m pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu118
+          pip install transformers
+          huggingface-cli whoami
       - name: Build lmdeploy
         run: |
           python3 -m pip install cmake
@@ -81,6 +83,7 @@ jobs:
           python3 -m pip install /root/packages/flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp38-cp38-linux_x86_64.whl
           python3 -m pip install -r requirements_cuda.txt -r requirements/test.txt
           python3 -m pip install .
+          pytest -rsE tests/test_lmdeploy/test_auto_backend.py
       - name: Check env
         run: |
           python3 -m pip list
@@ -91,7 +94,6 @@ jobs:
           echo "TODO"
       - name: Test lmdeploy python UT
         run: |
-          huggingface-cli login --token ${{ secrets.HF_TOKEN }}
           coverage run --branch --source lmdeploy -m pytest -rsE tests
           coverage xml
           coverage report -m
