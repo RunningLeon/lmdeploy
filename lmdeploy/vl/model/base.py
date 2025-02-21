@@ -38,8 +38,7 @@ class VisonModel(ABC):
             try:
                 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
                 pad_token_id = getattr(tokenizer, 'pad_token_id', None)
-            except Exception as e:
-                print(e)
+            except:  # noqa
                 pass
         return pad_token_id
 
