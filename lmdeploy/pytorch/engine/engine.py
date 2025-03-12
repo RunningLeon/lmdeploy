@@ -628,6 +628,7 @@ class Engine:
         running = scheduler_output.running
         swap_in_map = scheduler_output.swap_in_map
         swap_out_map = scheduler_output.swap_out_map
+        copy_map = scheduler_output.copy_map
         assert len(running) > 0
 
         # create inputs
@@ -645,6 +646,7 @@ class Engine:
                     inputs=inputs,
                     swap_in_map=swap_in_map,
                     swap_out_map=swap_out_map,
+                    copy_map=copy_map,
                     all_ids=all_ids,
                     guided_input_ids=guided_input_ids,
                     sampling_inputs=sampling_inputs,
