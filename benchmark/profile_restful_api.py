@@ -30,6 +30,10 @@ import requests
 from tqdm.asyncio import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerBase, PreTrainedTokenizerFast
 
+SYSTEM_PROMPT = """You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
+If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.
+"""  # noqa
+
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 global args
@@ -452,6 +456,7 @@ def sample_random_requests(
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
     dataset_path: str,
+    prefix_len: int = None,
 ) -> List[Tuple[str, int, int]]:
 
     input_lens = np.random.randint(
@@ -464,6 +469,15 @@ def sample_random_requests(
         output_len + 1,
         size=num_prompts,
     )
+    # create prefix prompt for testing prefix caching
+    prefix_prompt = ''
+    if prefix_len:
+        prefix_token_ids = tokenizer.encode(SYSTEM_PROMPT, add_special_tokens=False)
+        num_prefix_tks = len(prefix_token_ids)
+        if prefix_len > num_prefix_tks:
+            prefix_token_ids = prefix_token_ids * ((num_prefix_tks + prefix_len) // num_prefix_tks)
+        assert len(prefix_token_ids) >= prefix_len
+        prefix_prompt = tokenizer.decode(prefix_token_ids[:prefix_len])
 
     if True:
         # Sample token ids from ShareGPT and repeat/truncate them to
@@ -488,7 +502,7 @@ def sample_random_requests(
         input_requests: List[Tuple[str, int, int]] = []
         for i in range(num_prompts):
             # Tokenize the prompts and completions.
-            prompt = dataset[i][0]
+            prompt = prefix_prompt + dataset[i][0]
             prompt_token_ids = tokenizer.encode(prompt)
             prompt_len = len(prompt_token_ids)
 
@@ -869,14 +883,13 @@ def run_benchmark(args_: argparse.Namespace):
     elif args.dataset_name == 'random':
         assert args.random_input_len is not None and \
             args.random_output_len is not None
-        input_requests = sample_random_requests(
-            input_len=args.random_input_len,
-            output_len=args.random_output_len,
-            num_prompts=args.num_prompts,
-            range_ratio=args.random_range_ratio,
-            tokenizer=tokenizer,
-            dataset_path=args.dataset_path,
-        )
+        input_requests = sample_random_requests(input_len=args.random_input_len,
+                                                output_len=args.random_output_len,
+                                                num_prompts=args.num_prompts,
+                                                range_ratio=args.random_range_ratio,
+                                                tokenizer=tokenizer,
+                                                dataset_path=args.dataset_path,
+                                                prefix_len=args.random_prefix_len)
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')
 
@@ -982,6 +995,13 @@ if __name__ == '__main__':
         type=int,
         help='Number of input tokens per request, used only for random '
         'dataset.',
+    )
+    parser.add_argument(
+        '--random-prefix-len',
+        type=int,
+        help='Number of prefix tokens per request, used only for random '
+        'dataset.',
+        default=None,
     )
     parser.add_argument(
         '--random-output-len',

@@ -371,6 +371,17 @@ class HistoryMultiModals:
         if multimodals is None:
             multimodals = dict()
         self.multimodals = multimodals
+        self._init_mm_ranges()
+
+    def _init_mm_ranges(self):
+        """init mm ranges and sort it."""
+        mm_ranges = []
+        for _, modal_datas in self.multimodals.items():
+            for modal_data in modal_datas:
+                data = (modal_data.start, modal_data.end, modal_data.meta.get('hash_value', None))
+                mm_ranges.append(data)
+        mm_ranges.sort(key=lambda x: x[1])
+        self._mm_ranges = mm_ranges
 
     def get_datas(self, start=0, end=-1):
         """get multimodals from prompts position [start, end)."""
@@ -386,6 +397,28 @@ class HistoryMultiModals:
                 outs[modal_type] = data
         return outs
 
+    def get_step(self, step: int):
+        """get step that before a whole image."""
+        real_step = step
+        for start, end, _ in self._mm_ranges:
+            if start <= real_step < end:
+                real_step = start
+        return real_step
+
+    def get_hash_values(self, start: int, end: int):
+        """get multimodals hash values that from [start, end)"""
+        mm_hash_values = []
+        multimodal_ends = []
+        for mm_start, mm_end, hash_value in self._mm_ranges:
+            # the mm range intersect with the target range
+            if mm_start < end and mm_end > start:
+                mm_hash_values.append(hash_value)
+            # the mm end in the target range
+            if start < mm_end <= end:
+                cur_data = (tuple(mm_hash_values), mm_end)
+                multimodal_ends.append(cur_data)
+        return tuple(mm_hash_values), multimodal_ends
+
     def add_inputs(self, input_mms: MultiModalInputs):
         """add new inputs."""
         for modal_type, vals in input_mms.items():
@@ -393,6 +426,14 @@ class HistoryMultiModals:
                 self.multimodals[modal_type] += vals
             else:
                 self.multimodals[modal_type] = vals
+
+            # update mm_ranges
+            for modal_data in vals:
+                data = (modal_data.start, modal_data.end, modal_data.meta.get('hash_value', None))
+                self._mm_ranges.append(data)
+
+        # sort mm_ranges
+        self._mm_ranges.sort(key=lambda x: x[1])
 
     def empty(self):
         if len(self.multimodals) == 0:
@@ -610,9 +651,8 @@ class SchedulerSequence:
         """set step."""
         num_all_ids = self.num_all_ids
         # update step for vlm
-        if len(self.history_embeddings) > 0:
-            new_step, self._num_history_images, self._num_images = \
-                self.history_embeddings.get_step(step)
+        if self.history_multimodals is not None:
+            new_step = self.history_multimodals.get_step(step)
             assert 0 <= new_step <= step
             step = new_step
         self._num_history_ids = step
