@@ -13,7 +13,7 @@ from .block_manager import BaseBlockManager
 class Node:
     """node of block trie."""
 
-    def __init__(self, hash_key: int, block: int, tokens: np.ndarray, num_matched: int = 0, is_full: bool = True):
+    def __init__(self, hash_key: int, block: int, tokens: np.ndarray, num_matched: int = 0, is_full: bool = True, is_multimodal: bool=False):
         self.hash_key = hash_key
         self.block = block
         self.tokens = tokens
@@ -21,6 +21,7 @@ class Node:
         self.children: Dict[int, 'Node'] = dict()
         self._parent: 'Node' = None
         self.is_full = is_full
+        self.is_mulmimodal = is_multimodal
 
     @property
     def parent(self):
@@ -186,32 +187,37 @@ class BlockTrie:
 
         block_size = self.block_size
         matched_blocks = []
-
         logical_blocks = seq.logical_blocks
         curr: Node = getattr(logical_blocks, 'last_shared_node', None)
+
         last_max_num_matched = 0
         if curr is None:
             curr = self.get_root(seq.adapter_name)
-            last_max_num_matched = curr.num_matched
         elif not curr.is_full:
             # if there is a full block or the rest blocks contain vision tokens
-            if curr.parent.num_matched + block_size < seq.num_all_ids:
+            if curr.parent.num_matched + block_size > seq.num_all_ids:
                 mm_hash_values, _ = seq.history_multimodals.get_hash_values(curr.num_matched, seq.num_all_ids)
                 if not mm_hash_values:
                     return copy_map
             last_max_num_matched = curr.num_matched
             curr = curr.parent
+        else:
+            last_max_num_matched = curr.num_matched
 
         num_matched = curr.num_matched
+        print(f'>>> match seq {seq.seq_id} {num_matched} {seq.num_all_ids}')
 
         def __match_success(node: Node):
             nonlocal curr, num_matched, copy_map
-            block = node.block
+            print(f'matched success: seq_id {seq.seq_id} range=({num_matched}, {node.num_matched}), block={node.block} is_full={node.is_full}')
+            
             if not node.is_full:
                 # when match an unfull block, need to copy to reuse the kv cache in that block
-                new_block = self.allocator.allocate(1, device='gpu').item()
-                copy_map[block] = new_block
-                block = new_block
+                block = self.allocator.allocate(1, device='gpu').item()
+                print(f'matched create new copy block {node.block} -> {block} free blocsk={self.block_manager.get_num_free_gpu_blocks()}')
+                copy_map[node.block] = block
+            else:
+                block = node.block
             matched_blocks.append(block)
             curr = node
             num_matched += block_size
@@ -229,13 +235,16 @@ class BlockTrie:
                 if len(mm_multi_ends) == 0 or mm_multi_ends[-1][1] != (num_matched + block_size):
                     mm_multi_ends.append((mm_hash_values, num_matched + block_size))
                 mm_multi_ends = [(key, end) for key, end in mm_multi_ends
-                                 if last_max_num_matched < end < seq.num_all_ids]
+                                 if last_max_num_matched < end <= seq.num_all_ids]
                 mm_multi_ends.reverse()
 
             matched_node = None
             for cur_mm_hash_values, cur_matched_end in mm_multi_ends:
                 curr_tokens = seq.history_cache[num_matched:cur_matched_end]
                 is_full = len(curr_tokens) == block_size
+                if (not is_full) and self.block_manager.get_num_free_gpu_blocks() < 1:
+                    print(f'>>> no free gpu blocks seq {seq.seq_id}')
+                    continue
                 hash_data = tuple(curr_tokens)
                 if cur_mm_hash_values:
                     hash_data = (hash_data, cur_mm_hash_values)
@@ -254,9 +263,14 @@ class BlockTrie:
                 break
 
         if len(matched_blocks) > 0:
+            add_ref_blocks = matched_blocks
+            if len(copy_map):
+                add_ref_blocks = [b for b in add_ref_blocks if b not in copy_map.values()]
+            add_ref_blocks = np.array(add_ref_blocks)
             matched_blocks = np.array(matched_blocks)
             self.allocator.update_access_time(matched_blocks)
-            self.allocator.add_ref_count(matched_blocks, 1)
+            if len(add_ref_blocks) > 0:
+                self.allocator.add_ref_count(add_ref_blocks, 1)
             seq.logical_blocks.append(matched_blocks)
             seq.set_step(matched_step)
 
@@ -276,22 +290,21 @@ class BlockTrie:
         if node is None:
             node = self.get_root(seq.adapter_name)
             logical_blocks.last_shared_node = node
-            last_max_num_matched = node.num_matched
         elif not node.is_full:
             # if there is a full block or the rest blocks contain vision tokens
-            if node.parent.num_matched + block_size < seq.num_all_ids:
+            if node.parent.num_matched + block_size > seq.num_all_ids:
                 mm_hash_values, _ = seq.history_multimodals.get_hash_values(node.num_matched, seq.num_all_ids)
                 if not mm_hash_values:
                     return copy_map
             # back to parent node for un-full node
             last_max_num_matched = node.num_matched
             node = node.parent
+        else:
+            last_max_num_matched = node.num_matched
 
         num_matched = node.num_matched
         num_all_ids = seq.num_all_ids
-
-        if num_matched > num_all_ids:
-            return
+        print(f'>>> allocate seq {seq.seq_id} {num_matched} {seq.num_all_ids}')
 
         if len(node.children) == 0 and node.parent is not None:
             self.leaves.remove(node)
@@ -306,6 +319,7 @@ class BlockTrie:
             nonlocal free_blocks, blocks
             unfull_nodes = []
             for cur_mm_hash_values, cur_matched_end in multi_segments:
+                assert cur_mm_hash_values, 'only support multimodal unfull'
                 curr_tokens = seq.history_cache[num_matched:cur_matched_end]
                 is_full = len(curr_tokens) == block_size
                 assert not is_full
@@ -314,7 +328,9 @@ class BlockTrie:
                 block = logical_blocks[block_id]
                 if hash_key in parent.children:
                     child = parent.children[hash_key]
+                    print(f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
                     if np.array_equal(curr_tokens, child.tokens) and block != child.block:
+                        breakpoint()
                         copy_map[child.block] = block
                         unfull_nodes.append(child)
                 else:
@@ -322,7 +338,10 @@ class BlockTrie:
                                 block=block,
                                 tokens=curr_tokens,
                                 num_matched=cur_matched_end,
-                                is_full=is_full)
+                                is_full=is_full,
+                                is_multimodal=True
+                                )
+                    print(f'allocate seq {seq.seq_id } num_matched={num_matched} add a unfull node block={block} ')
                     node.parent = parent
                     blocks.append(node.block)
                     unfull_nodes.append(node)
@@ -335,7 +354,9 @@ class BlockTrie:
             is_full = len(curr_tokens) == block_size
             assert is_full
             hash_data = tuple(curr_tokens)
+            is_multimodal = False
             if mm_hash_values:
+                is_multimodal = True
                 hash_data = (hash_data, mm_hash_values)
             hash_key = hash(hash_data)
             block = logical_blocks[block_id]
@@ -348,12 +369,16 @@ class BlockTrie:
                 node = child
                 free_blocks.append(block)
                 logical_blocks[block_id] = node.block
+                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  resue [full] node block={node.block}')
             else:
                 node = Node(hash_key=hash_key,
                             block=block,
                             tokens=curr_tokens,
                             num_matched=num_matched + block_size,
-                            is_full=is_full)
+                            is_full=is_full,
+                            is_multimodal=is_multimodal
+                            )
+                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  add [full] node block={block}')
                 node.parent = parent
             blocks.append(node.block)
             return node, True
@@ -405,6 +430,7 @@ class BlockTrie:
 
     def evict(self, max_num_blocks: int):
         """evict."""
+        print(f'>>> need to evict {max_num_blocks}')
         if not self.enable:
             return 0
 
@@ -414,7 +440,7 @@ class BlockTrie:
             parent = leaf.parent
             leaf.parent = None
             self.leaves.remove(leaf)
-            return parent
+            return parent, leaf
 
         def __add_leaf(leaves, parent):
             self.leaves.add(parent)
@@ -440,13 +466,21 @@ class BlockTrie:
         heapq.heapify(leaves)
 
         while len(leaves) > 0 and len(evicted_blocks) < max_num_blocks:
-            parent = __remove_leaf(leaves, evicted_blocks)
+            parent, removed_leaf = __remove_leaf(leaves, evicted_blocks)
             if parent.parent is None:
                 # ignore root
                 continue
+            if removed_leaf.is_multimodal:
+                while parent.is_multimodal and len(parent.children) == 0:
+                    tmp = parent.parent
+                    evicted_blocks.append(parent.block)
+                    parent.parent = None
+                    parent = tmp
             if len(parent.children) == 0:
                 __add_leaf(leaves, parent)
 
+        print(f'>> evicted {len(evicted_blocks)} refs = {self.allocator.get_ref_count(np.array(evicted_blocks)).tolist()}')
+        
         self.allocator.free(np.array(evicted_blocks))
 
         return len(evicted_blocks)
