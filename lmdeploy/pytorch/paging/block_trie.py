@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import heapq
-from typing import Dict, Set
-
+from typing import Dict, Set, Tuple, List
+import torch
 import numpy as np
 
 from lmdeploy.pytorch.messages import SchedulerSequence
@@ -13,7 +13,7 @@ from .block_manager import BaseBlockManager
 class Node:
     """node of block trie."""
 
-    def __init__(self, hash_key: int, block: int, tokens: np.ndarray, num_matched: int = 0, is_full: bool = True, is_multimodal: bool=False):
+    def __init__(self, hash_key: int, block: int, tokens: np.ndarray, num_matched: int = 0, is_full: bool = True, mm_hashes: Tuple[str]= None):
         self.hash_key = hash_key
         self.block = block
         self.tokens = tokens
@@ -21,7 +21,7 @@ class Node:
         self.children: Dict[int, 'Node'] = dict()
         self._parent: 'Node' = None
         self.is_full = is_full
-        self.is_mulmimodal = is_multimodal
+        self.mm_hashes = mm_hashes
 
     @property
     def parent(self):
@@ -67,7 +67,7 @@ class BlockTrie:
         """match sequence and cache."""
         copy_map = {}
         if self.enable:
-            if seq.history_multimodals is None:
+            if seq.history_multimodals.empty():
                 self._match_text(seq)
             else:
                 copy_map = self._match_multimodals(seq)
@@ -77,7 +77,7 @@ class BlockTrie:
         """allocate."""
         copy_map = {}
         if self.enable:
-            if seq.history_multimodals is None:
+            if seq.history_multimodals.empty():
                 self._allocate_text(seq)
             else:
                 copy_map = self._allocate_multimodals(seq)
@@ -194,11 +194,14 @@ class BlockTrie:
         if curr is None:
             curr = self.get_root(seq.adapter_name)
         elif not curr.is_full:
+            if curr.parent is None:
+                curr.parent = self.get_root(seq.adapter_name)
             # if there is a full block or the rest blocks contain vision tokens
-            if curr.parent.num_matched + block_size > seq.num_all_ids:
+            if (curr.parent.num_matched + block_size) > seq.num_all_ids:
                 mm_hash_values, _ = seq.history_multimodals.get_hash_values(curr.num_matched, seq.num_all_ids)
                 if not mm_hash_values:
                     return copy_map
+
             last_max_num_matched = curr.num_matched
             curr = curr.parent
         else:
@@ -214,7 +217,7 @@ class BlockTrie:
             if not node.is_full:
                 # when match an unfull block, need to copy to reuse the kv cache in that block
                 block = self.allocator.allocate(1, device='gpu').item()
-                print(f'matched create new copy block {node.block} -> {block} free blocsk={self.block_manager.get_num_free_gpu_blocks()}')
+                print(f'matched create new copy block {node.block} -> {block} now free blocks={self.block_manager.get_num_free_gpu_blocks()}')
                 copy_map[node.block] = block
             else:
                 block = node.block
@@ -263,6 +266,10 @@ class BlockTrie:
                 break
 
         if len(matched_blocks) > 0:
+            # for vlm if matched step is in the middle of a vision segment, then match failed
+            if seq.history_multimodals is not None and seq.history_multimodals.get_step(matched_step) != matched_step:
+                return {}
+            
             add_ref_blocks = matched_blocks
             if len(copy_map):
                 add_ref_blocks = [b for b in add_ref_blocks if b not in copy_map.values()]
@@ -286,16 +293,20 @@ class BlockTrie:
         block_size = self.block_size
         logical_blocks = seq.logical_blocks
         node: Node = getattr(logical_blocks, 'last_shared_node', None)
+
         last_max_num_matched = 0
         if node is None:
             node = self.get_root(seq.adapter_name)
             logical_blocks.last_shared_node = node
         elif not node.is_full:
+            if node.parent is None:
+                node.parent = self.get_root(seq.adapter_name)
             # if there is a full block or the rest blocks contain vision tokens
-            if node.parent.num_matched + block_size > seq.num_all_ids:
+            if (node.parent.num_matched + block_size) > seq.num_all_ids:
                 mm_hash_values, _ = seq.history_multimodals.get_hash_values(node.num_matched, seq.num_all_ids)
                 if not mm_hash_values:
                     return copy_map
+
             # back to parent node for un-full node
             last_max_num_matched = node.num_matched
             node = node.parent
@@ -304,6 +315,7 @@ class BlockTrie:
 
         num_matched = node.num_matched
         num_all_ids = seq.num_all_ids
+
         print(f'>>> allocate seq {seq.seq_id} {num_matched} {seq.num_all_ids}')
 
         if len(node.children) == 0 and node.parent is not None:
@@ -314,9 +326,10 @@ class BlockTrie:
         blocks = []
         free_blocks = []
 
-        def __add_unfull_nodes(parent, multi_segments):
+        def __add_unfull_nodes(parent: Node, multi_segments: List[Tuple[Tuple[str], int]]):
             # add multiple nodes of un-full blocks
             nonlocal free_blocks, blocks
+
             unfull_nodes = []
             for cur_mm_hash_values, cur_matched_end in multi_segments:
                 assert cur_mm_hash_values, 'only support multimodal unfull'
@@ -328,42 +341,41 @@ class BlockTrie:
                 block = logical_blocks[block_id]
                 if hash_key in parent.children:
                     child = parent.children[hash_key]
-                    print(f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
-                    if np.array_equal(curr_tokens, child.tokens) and block != child.block:
-                        breakpoint()
+                    if child.mm_hashes == cur_mm_hash_values and np.array_equal(curr_tokens, child.tokens) and block != child.block:
                         copy_map[child.block] = block
                         unfull_nodes.append(child)
+                        print(f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
                 else:
-                    node = Node(hash_key=hash_key,
+                    child = Node(hash_key=hash_key,
                                 block=block,
                                 tokens=curr_tokens,
                                 num_matched=cur_matched_end,
                                 is_full=is_full,
-                                is_multimodal=True
+                                mm_hashes=cur_mm_hash_values
                                 )
                     print(f'allocate seq {seq.seq_id } num_matched={num_matched} add a unfull node block={block} ')
-                    node.parent = parent
-                    blocks.append(node.block)
-                    unfull_nodes.append(node)
+                    child.parent = parent
+                    blocks.append(child.block)
+                    unfull_nodes.append(child)
+                
             return unfull_nodes
 
         def __add_full_node(node, mm_hash_values):
-            # add a node of a full block
+            # add a node of a full-filled block
             nonlocal free_blocks, blocks
+
             curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
             is_full = len(curr_tokens) == block_size
             assert is_full
             hash_data = tuple(curr_tokens)
-            is_multimodal = False
             if mm_hash_values:
-                is_multimodal = True
                 hash_data = (hash_data, mm_hash_values)
             hash_key = hash(hash_data)
             block = logical_blocks[block_id]
             parent = node
             if hash_key in parent.children:
                 child = parent.children[hash_key]
-                if not np.array_equal(curr_tokens, child.tokens):
+                if child.mm_hashes != mm_hash_values or not np.array_equal(curr_tokens, child.tokens):
                     # hash collision
                     return node, False
                 node = child
@@ -376,7 +388,7 @@ class BlockTrie:
                             tokens=curr_tokens,
                             num_matched=num_matched + block_size,
                             is_full=is_full,
-                            is_multimodal=is_multimodal
+                            mm_hashes=mm_hash_values
                             )
                 print(f'allocate seq {seq.seq_id } num_matched={num_matched}  add [full] node block={block}')
                 node.parent = parent
@@ -396,7 +408,7 @@ class BlockTrie:
                 elif mm_multi_ends[-1][1] == (num_matched + block_size):
                     # the last token is vision token and is vision end token
                     full_mm_hash_values, _ = mm_multi_ends.pop(-1)
-                mm_multi_ends = [(key, end) for key, end in mm_multi_ends if last_max_num_matched < end < num_all_ids]
+                mm_multi_ends = [(key, end) for key, end in mm_multi_ends if last_max_num_matched < end <= num_all_ids]
                 if len(mm_multi_ends) > 0:
                     cur_unfull_nodes = __add_unfull_nodes(node, mm_multi_ends)
                     if len(cur_unfull_nodes) > 0:
@@ -430,7 +442,6 @@ class BlockTrie:
 
     def evict(self, max_num_blocks: int):
         """evict."""
-        print(f'>>> need to evict {max_num_blocks}')
         if not self.enable:
             return 0
 
@@ -470,17 +481,17 @@ class BlockTrie:
             if parent.parent is None:
                 # ignore root
                 continue
-            if removed_leaf.is_multimodal:
-                while parent.is_multimodal and len(parent.children) == 0:
-                    tmp = parent.parent
+            # remove nodes of with same mm_hashes
+            if removed_leaf.mm_hashes:
+                while removed_leaf.mm_hashes == parent.mm_hashes and len(parent.children) == 0 and self.allocator.get_ref_count(parent.block) == 1:
+                    tmp_parent = parent.parent
                     evicted_blocks.append(parent.block)
                     parent.parent = None
-                    parent = tmp
+                    parent = tmp_parent
+
             if len(parent.children) == 0:
                 __add_leaf(leaves, parent)
 
-        print(f'>> evicted {len(evicted_blocks)} refs = {self.allocator.get_ref_count(np.array(evicted_blocks)).tolist()}')
-        
         self.allocator.free(np.array(evicted_blocks))
 
         return len(evicted_blocks)
