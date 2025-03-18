@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import heapq
-from typing import Dict, Set, Tuple, List
-import torch
+from typing import Dict, List, Set, Tuple
+
 import numpy as np
 
 from lmdeploy.pytorch.messages import SchedulerSequence
@@ -13,7 +13,13 @@ from .block_manager import BaseBlockManager
 class Node:
     """node of block trie."""
 
-    def __init__(self, hash_key: int, block: int, tokens: np.ndarray, num_matched: int = 0, is_full: bool = True, mm_hashes: Tuple[str]= None):
+    def __init__(self,
+                 hash_key: int,
+                 block: int,
+                 tokens: np.ndarray,
+                 num_matched: int = 0,
+                 is_full: bool = True,
+                 mm_hashes: Tuple[str] = None):
         self.hash_key = hash_key
         self.block = block
         self.tokens = tokens
@@ -212,12 +218,16 @@ class BlockTrie:
 
         def __match_success(node: Node):
             nonlocal curr, num_matched, copy_map
-            print(f'matched success: seq_id {seq.seq_id} range=({num_matched}, {node.num_matched}), block={node.block} is_full={node.is_full}')
-            
+            print(
+                f'matched success: seq_id {seq.seq_id} range=({num_matched}, {node.num_matched}), block={node.block} is_full={node.is_full}'
+            )
+
             if not node.is_full:
                 # when match an unfull block, need to copy to reuse the kv cache in that block
                 block = self.allocator.allocate(1, device='gpu').item()
-                print(f'matched create new copy block {node.block} -> {block} now free blocks={self.block_manager.get_num_free_gpu_blocks()}')
+                print(
+                    f'matched create new copy block {node.block} -> {block} now free blocks={self.block_manager.get_num_free_gpu_blocks()}'
+                )
                 copy_map[node.block] = block
             else:
                 block = node.block
@@ -269,7 +279,7 @@ class BlockTrie:
             # for vlm if matched step is in the middle of a vision segment, then match failed
             if seq.history_multimodals is not None and seq.history_multimodals.get_step(matched_step) != matched_step:
                 return {}
-            
+
             add_ref_blocks = matched_blocks
             if len(copy_map):
                 add_ref_blocks = [b for b in add_ref_blocks if b not in copy_map.values()]
@@ -341,23 +351,24 @@ class BlockTrie:
                 block = logical_blocks[block_id]
                 if hash_key in parent.children:
                     child = parent.children[hash_key]
-                    if child.mm_hashes == cur_mm_hash_values and np.array_equal(curr_tokens, child.tokens) and block != child.block:
+                    if child.mm_hashes == cur_mm_hash_values and np.array_equal(curr_tokens,
+                                                                                child.tokens) and block != child.block:
                         copy_map[child.block] = block
                         unfull_nodes.append(child)
-                        print(f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
+                        print(
+                            f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
                 else:
                     child = Node(hash_key=hash_key,
-                                block=block,
-                                tokens=curr_tokens,
-                                num_matched=cur_matched_end,
-                                is_full=is_full,
-                                mm_hashes=cur_mm_hash_values
-                                )
+                                 block=block,
+                                 tokens=curr_tokens,
+                                 num_matched=cur_matched_end,
+                                 is_full=is_full,
+                                 mm_hashes=cur_mm_hash_values)
                     print(f'allocate seq {seq.seq_id } num_matched={num_matched} add a unfull node block={block} ')
                     child.parent = parent
                     blocks.append(child.block)
                     unfull_nodes.append(child)
-                
+
             return unfull_nodes
 
         def __add_full_node(node, mm_hash_values):
@@ -381,15 +392,14 @@ class BlockTrie:
                 node = child
                 free_blocks.append(block)
                 logical_blocks[block_id] = node.block
-                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  resue [full] node block={node.block}')
+                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  reuse [full] node block={node.block}')
             else:
                 node = Node(hash_key=hash_key,
                             block=block,
                             tokens=curr_tokens,
                             num_matched=num_matched + block_size,
                             is_full=is_full,
-                            mm_hashes=mm_hash_values
-                            )
+                            mm_hashes=mm_hash_values)
                 print(f'allocate seq {seq.seq_id } num_matched={num_matched}  add [full] node block={block}')
                 node.parent = parent
             blocks.append(node.block)
@@ -483,7 +493,8 @@ class BlockTrie:
                 continue
             # remove nodes of with same mm_hashes
             if removed_leaf.mm_hashes:
-                while removed_leaf.mm_hashes == parent.mm_hashes and len(parent.children) == 0 and self.allocator.get_ref_count(parent.block) == 1:
+                while removed_leaf.mm_hashes == parent.mm_hashes and len(
+                        parent.children) == 0 and self.allocator.get_ref_count(parent.block) == 1:
                     tmp_parent = parent.parent
                     evicted_blocks.append(parent.block)
                     parent.parent = None
