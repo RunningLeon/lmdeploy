@@ -5,9 +5,13 @@ from typing import Dict, List, Set, Tuple
 import numpy as np
 
 from lmdeploy.pytorch.messages import SchedulerSequence
+from lmdeploy.utils import get_logger, logging_timer
 
 from ..config import CacheConfig
 from .block_manager import BaseBlockManager
+
+
+logger = get_logger('lmdeploy')
 
 
 class Node:
@@ -69,6 +73,7 @@ class BlockTrie:
             self._roots[adapter_name] = Node(-1, -1, None)
         return self._roots[adapter_name]
 
+    @logging_timer('BlockTrie_Match', logger)
     def match(self, seq: SchedulerSequence) -> Dict[int, int]:
         """match sequence and cache."""
         copy_map = {}
@@ -79,6 +84,7 @@ class BlockTrie:
                 copy_map = self._match_multimodals(seq)
         return copy_map
 
+    @logging_timer('BlockTrie_Allocate', logger)
     def allocate(self, seq: SchedulerSequence) -> Dict[int, int]:
         """allocate."""
         copy_map = {}
@@ -214,20 +220,17 @@ class BlockTrie:
             last_max_num_matched = curr.num_matched
 
         num_matched = curr.num_matched
-        print(f'>>> match seq {seq.seq_id} {num_matched} {seq.num_all_ids}')
+        logger.debug(f'Matching seq-{seq.seq_id} {num_matched}/{seq.num_all_ids}')
 
         def __match_success(node: Node):
             nonlocal curr, num_matched, copy_map
-            print(
-                f'matched success: seq_id {seq.seq_id} range=({num_matched}, {node.num_matched}), block={node.block} is_full={node.is_full}'
-            )
+            logger.debug(f'Matched token range=({num_matched}, {node.num_matched}), block={node.block} is_full={node.is_full}')
 
             if not node.is_full:
                 # when match an unfull block, need to copy to reuse the kv cache in that block
                 block = self.allocator.allocate(1, device='gpu').item()
-                print(
-                    f'matched create new copy block {node.block} -> {block} now free blocks={self.block_manager.get_num_free_gpu_blocks()}'
-                )
+                logger.debug(
+                    f'Create new copy block {node.block} -> {block} now free blocks={self.block_manager.get_num_free_gpu_blocks()}')
                 copy_map[node.block] = block
             else:
                 block = node.block
@@ -256,7 +259,7 @@ class BlockTrie:
                 curr_tokens = seq.history_cache[num_matched:cur_matched_end]
                 is_full = len(curr_tokens) == block_size
                 if (not is_full) and self.block_manager.get_num_free_gpu_blocks() < 1:
-                    print(f'>>> no free gpu blocks seq {seq.seq_id}')
+                    logger.debug(f'No free gpu blocks for seq {seq.seq_id}')
                     continue
                 hash_data = tuple(curr_tokens)
                 if cur_mm_hash_values:
@@ -326,7 +329,7 @@ class BlockTrie:
         num_matched = node.num_matched
         num_all_ids = seq.num_all_ids
 
-        print(f'>>> allocate seq {seq.seq_id} {num_matched} {seq.num_all_ids}')
+        logger.debug(f'Allocate seq-{seq.seq_id} {num_matched}/{seq.num_all_ids}')
 
         if len(node.children) == 0 and node.parent is not None:
             self.leaves.remove(node)
@@ -355,8 +358,7 @@ class BlockTrie:
                                                                                 child.tokens) and block != child.block:
                         copy_map[child.block] = block
                         unfull_nodes.append(child)
-                        print(
-                            f'allocate seq {seq.seq_id } num_matched={num_matched} reuse a unfull node block={block} ')
+                        logger.debug(f'allocate num_matched={num_matched} reuse a [unfull] node block={block}')
                 else:
                     child = Node(hash_key=hash_key,
                                  block=block,
@@ -364,7 +366,7 @@ class BlockTrie:
                                  num_matched=cur_matched_end,
                                  is_full=is_full,
                                  mm_hashes=cur_mm_hash_values)
-                    print(f'allocate seq {seq.seq_id } num_matched={num_matched} add a unfull node block={block} ')
+                    logger.debug(f'allocate num_matched={num_matched} add a [unfull] node block={block} ')
                     child.parent = parent
                     blocks.append(child.block)
                     unfull_nodes.append(child)
@@ -392,7 +394,7 @@ class BlockTrie:
                 node = child
                 free_blocks.append(block)
                 logical_blocks[block_id] = node.block
-                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  reuse [full] node block={node.block}')
+                logger.debug(f'allocate num_matched={num_matched}  reuse [full] node block={node.block}')
             else:
                 node = Node(hash_key=hash_key,
                             block=block,
@@ -400,7 +402,7 @@ class BlockTrie:
                             num_matched=num_matched + block_size,
                             is_full=is_full,
                             mm_hashes=mm_hash_values)
-                print(f'allocate seq {seq.seq_id } num_matched={num_matched}  add [full] node block={block}')
+                logger.debug(f'allocate num_matched={num_matched}  add [full] node block={block}')
                 node.parent = parent
             blocks.append(node.block)
             return node, True
@@ -450,10 +452,12 @@ class BlockTrie:
 
         return copy_map
 
+    @logging_timer('BlockTrie_Evict', logger)
     def evict(self, max_num_blocks: int):
         """evict."""
         if not self.enable:
             return 0
+        logger.debug(f'Need to evict max_num_blocks={max_num_blocks}')
 
         def __remove_leaf(leaves, evicted_blocks):
             _, leaf = heapq.heappop(leaves)
@@ -461,6 +465,7 @@ class BlockTrie:
             parent = leaf.parent
             leaf.parent = None
             self.leaves.remove(leaf)
+            logger.debug(f'Evict block={leaf.block} node.mm_hashes={leaf.mm_hashes}')
             return parent, leaf
 
         def __add_leaf(leaves, parent):
@@ -497,6 +502,7 @@ class BlockTrie:
                         parent.children) == 0 and self.allocator.get_ref_count(parent.block) == 1:
                     tmp_parent = parent.parent
                     evicted_blocks.append(parent.block)
+                    logger.debug(f'Evict block={parent.block} node.mm_hashes={parent.mm_hashes}')
                     parent.parent = None
                     parent = tmp_parent
 
@@ -504,5 +510,5 @@ class BlockTrie:
                 __add_leaf(leaves, parent)
 
         self.allocator.free(np.array(evicted_blocks))
-
+        logger.debug(f'Evict final blocks={evicted_blocks} refs={self.allocator.get_ref_count(np.array(evicted_blocks))}')
         return len(evicted_blocks)
