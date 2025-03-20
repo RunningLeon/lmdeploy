@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import heapq
 from typing import Dict, List, Set, Tuple
+from collections import defaultdict
 
 import numpy as np
 
@@ -185,6 +186,8 @@ class BlockTrie:
         logical_blocks.last_shared_node = node
         if node.parent is not None and len(node.children) == 0:
             # ignore root
+            if node is None or node.block == -1:
+                breakpoint()
             self.leaves.add(node)
         if len(blocks) > 0:
             self.allocator.add_ref_count(np.array(blocks), 1)
@@ -219,6 +222,12 @@ class BlockTrie:
         else:
             last_max_num_matched = curr.num_matched
 
+        # if there is a full block or the rest blocks contain vision tokens
+        if (curr.num_matched + block_size) > seq.num_all_ids:
+            mm_hash_values, _ = seq.history_multimodals.get_hash_values(last_max_num_matched, seq.num_all_ids)
+            if not mm_hash_values:
+                return copy_map
+            
         num_matched = curr.num_matched
         logger.debug(f'Matching seq-{seq.seq_id} {num_matched}/{seq.num_all_ids}')
 
@@ -285,6 +294,7 @@ class BlockTrie:
 
             add_ref_blocks = matched_blocks
             if len(copy_map):
+                self.allocator.update_access_time(np.array(list(copy_map.keys())))
                 add_ref_blocks = [b for b in add_ref_blocks if b not in copy_map.values()]
             add_ref_blocks = np.array(add_ref_blocks)
             matched_blocks = np.array(matched_blocks)
@@ -326,6 +336,12 @@ class BlockTrie:
         else:
             last_max_num_matched = node.num_matched
 
+        # if there is a full block or the rest blocks contain vision tokens
+        if (node.num_matched + block_size) > seq.num_all_ids:
+            mm_hash_values, _ = seq.history_multimodals.get_hash_values(last_max_num_matched, seq.num_all_ids)
+            if not mm_hash_values:
+                return copy_map
+                
         num_matched = node.num_matched
         num_all_ids = seq.num_all_ids
 
@@ -443,10 +459,19 @@ class BlockTrie:
         for cur_node in (unfull_nodes + [last_node]):
             if cur_node.parent is not None and len(cur_node.children) == 0:
                 # ignore root
+                if cur_node is None or cur_node.block == -1:
+                    breakpoint()
                 self.leaves.add(cur_node)
 
         if len(blocks) > 0:
-            self.allocator.add_ref_count(np.array(blocks), 1)
+            update_time_blocks = blocks
+            if copy_map:
+                update_time_blocks += list(copy_map.keys())
+                update_time_blocks += list(copy_map.values())
+            self.allocator.update_access_time(np.array(update_time_blocks))
+            blocks = np.array(blocks)
+            self.allocator.add_ref_count(blocks, 1)
+
         if len(free_blocks) > 0:
             self.allocator.free(np.array(free_blocks))
 
@@ -455,7 +480,7 @@ class BlockTrie:
     @logging_timer('BlockTrie_Evict', logger)
     def evict(self, max_num_blocks: int):
         """evict."""
-        if not self.enable:
+        if not self.enable or len(self.leaves) == 0:
             return 0
         logger.debug(f'Need to evict max_num_blocks={max_num_blocks}')
 
@@ -465,15 +490,45 @@ class BlockTrie:
             parent = leaf.parent
             leaf.parent = None
             self.leaves.remove(leaf)
-            logger.debug(f'Evict block={leaf.block} node.mm_hashes={leaf.mm_hashes}')
+            logger.debug(f'Evict block={leaf.block} mm_hashes={leaf.mm_hashes} num_matched={leaf.num_matched}')
             return parent, leaf
 
         def __add_leaf(leaves, parent):
+            if parent is None or parent.block == -1:
+                breakpoint()
             self.leaves.add(parent)
             if self.allocator.get_ref_count(parent.block) == 1:
                 access_time = self.allocator.get_access_time(parent.block)
+                logger.debug(f'Evict heappush block={parent.block} mm_hashes={parent.mm_hashes} num_matched={parent.num_matched}')
                 heapq.heappush(leaves, (access_time, parent))
 
+        def __filter_leaf(leaves, ref_cnt):
+            # when the same block is referenced by multiple nodes
+            # we need to remove the full block first
+            groups = defaultdict(list)
+            for idx in range(len(leaves)):
+                groups[leaves[idx].block].append(idx)
+            
+            indices = []
+            deduce_ref_blocks = []
+            for gp in groups.values():
+                num = len(gp)
+                # only deal with a block is refed by a unfull node and a full node case
+                if num == 2 and num == ref_cnt[gp[0]]:
+                    full, unfull = gp
+                    if leaves[unfull].is_full:
+                        full, unfull = unfull, full
+                    # remove full node
+                    leaves[full].parent = None
+                    logger.debug(f'Evict remove duplicate full block={leaves[full].block} mm_hashes={leaves[full].mm_hashes} num_matched={leaves[full].num_matched}')
+                    self.leaves.remove(leaves[full])
+                    deduce_ref_blocks.append(leaves[full].block)
+                    indices.append(unfull)
+            
+            if len(deduce_ref_blocks) > 0:
+                self.allocator.add_ref_count(np.array(deduce_ref_blocks), -1)
+            return indices
+        
         evicted_blocks = []
         leaves = list(self.leaves)
 
@@ -482,8 +537,10 @@ class BlockTrie:
         ref_cnt = self.allocator.get_ref_count(leave_blocks)
         indices = (ref_cnt == 1).nonzero()[0]
         if len(indices) == 0:
-            return 0
-
+            indices = __filter_leaf(leaves, ref_cnt)
+            if len(indices) == 0:
+                return 0
+        
         # make heap
         leaves = list(leaves[i] for i in indices)
         access_times = self.allocator.get_access_time(leave_blocks)
@@ -492,6 +549,8 @@ class BlockTrie:
         heapq.heapify(leaves)
 
         while len(leaves) > 0 and len(evicted_blocks) < max_num_blocks:
+            if any([l[1] is None or l[1].parent is None for l in leaves]):
+                breakpoint()
             parent, removed_leaf = __remove_leaf(leaves, evicted_blocks)
             if parent.parent is None:
                 # ignore root
@@ -502,10 +561,13 @@ class BlockTrie:
                         parent.children) == 0 and self.allocator.get_ref_count(parent.block) == 1:
                     tmp_parent = parent.parent
                     evicted_blocks.append(parent.block)
-                    logger.debug(f'Evict block={parent.block} node.mm_hashes={parent.mm_hashes}')
+                    logger.debug(f'Evict block={parent.block} mm_hashes={parent.mm_hashes} num_matched={parent.num_matched}')
                     parent.parent = None
                     parent = tmp_parent
-
+            
+            if parent.parent is None:
+                # ignore root
+                continue
             if len(parent.children) == 0:
                 __add_leaf(leaves, parent)
 
