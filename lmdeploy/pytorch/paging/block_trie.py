@@ -502,9 +502,9 @@ class BlockTrie:
                 logger.debug(f'Evict heappush block={parent.block} mm_hashes={parent.mm_hashes} num_matched={parent.num_matched}')
                 heapq.heappush(leaves, (access_time, parent))
 
-        def __filter_leaf(leaves, ref_cnt):
+        def __filter_leaf(leaves: List[Node], ref_cnt: np.ndarray):
             # when the same block is referenced by multiple nodes
-            # we need to remove the full block first
+            # we need to remove the full node first
             groups = defaultdict(list)
             for idx in range(len(leaves)):
                 groups[leaves[idx].block].append(idx)
@@ -513,8 +513,8 @@ class BlockTrie:
             deduce_ref_blocks = []
             for gp in groups.values():
                 num = len(gp)
-                # only deal with a block is refed by a unfull node and a full node case
-                if num == 2 and num == ref_cnt[gp[0]]:
+                # only deal with a block is refered by a unfull node and a full node case
+                if num == 2 and ref_cnt[gp[0]] == 2:
                     full, unfull = gp
                     if leaves[unfull].is_full:
                         full, unfull = unfull, full
@@ -530,19 +530,19 @@ class BlockTrie:
             return indices
         
         evicted_blocks = []
-        leaves = list(self.leaves)
+        trie_leaves = list(self.leaves)
 
         # filter ref-cnt == 1 (trie own one block ref)
-        leave_blocks = np.array(list(leaf.block for leaf in leaves))
+        leave_blocks = np.array(list(leaf.block for leaf in trie_leaves))
         ref_cnt = self.allocator.get_ref_count(leave_blocks)
         indices = (ref_cnt == 1).nonzero()[0]
         if len(indices) == 0:
-            indices = __filter_leaf(leaves, ref_cnt)
+            indices = __filter_leaf(trie_leaves, ref_cnt)
             if len(indices) == 0:
                 return 0
         
         # make heap
-        leaves = list(leaves[i] for i in indices)
+        leaves = list(trie_leaves[i] for i in indices)
         access_times = self.allocator.get_access_time(leave_blocks)
         access_times = list(access_times[i] for i in indices)
         leaves = list(zip(access_times, leaves))
@@ -551,6 +551,7 @@ class BlockTrie:
         while len(leaves) > 0 and len(evicted_blocks) < max_num_blocks:
             if any([l[1] is None or l[1].parent is None for l in leaves]):
                 breakpoint()
+            print(f'while in evit, condition={len(leaves)} {len(evicted_blocks)} {max_num_blocks}')
             parent, removed_leaf = __remove_leaf(leaves, evicted_blocks)
             if parent.parent is None:
                 # ignore root
