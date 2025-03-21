@@ -28,7 +28,7 @@ def msg_with_rank(rank: int, msg: str):
     return f'rank[{rank}] - {msg}'
 
 
-def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict, swap_out_map: dict):
+def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict, swap_out_map: dict, copy_map: dict):
     """perform cache swapping."""
     issued_cache_op = False
     if len(swap_in_map) > 0:
@@ -37,7 +37,9 @@ def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict, swap_out_map: d
     if len(swap_out_map) > 0:
         cache_engine.swap_out(swap_out_map)
         issued_cache_op = True
-
+    if len(copy_map) > 0:
+        cache_engine.copy_to(copy_map)
+        issued_cache_op = True
     if issued_cache_op:
         cache_engine.events.wait()
 
@@ -63,7 +65,6 @@ def model_forward(
             kv_quant_policy=cache_engine.cache_config.quant_policy,
         )
         with ctx_mgr.context(context):
-            model_metas = None
             model_metas = model.update_model_metas(
                 past_key_values=cache_engine.gpu_cache,
                 context=context,
@@ -123,7 +124,7 @@ class AutoModelAgent:
         with device_mgr.context(self.device_ctx), dist_mgr.context(self.dist_ctx):
             yield
 
-    async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+    async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap, copy_map: SwapMap):
         """model forward.
 
         Args:
@@ -172,7 +173,7 @@ class AutoModelAgent:
             gpu_mem_physical_free, _ = get_gpu_memory()
             return gpu_mem_physical_free
 
-    async def _async_model_forward(self, inputs: ModelInputs, swap_in_map: Dict, swap_out_map: Dict,
+    async def _async_model_forward(self, inputs: ModelInputs, swap_in_map: Dict, swap_out_map: Dict, copy_map: Dict,
                                    return_logits: bool):
         """model forward."""
         max_prefill_token_num = self.cache_config.max_prefill_token_num
@@ -212,12 +213,15 @@ class AutoModelAgent:
 
         async def __forward(inputs):
             """forward."""
-            nonlocal swap_done, swap_in_map, swap_out_map
+            nonlocal swap_done, swap_in_map, swap_out_map, copy_map
             if swap_done:
-                return await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict())
+                return await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict(), copy_map=dict())
             else:
                 swap_done = True
-                return await self.async_forward(inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+                return await self.async_forward(inputs,
+                                                swap_in_map=swap_in_map,
+                                                swap_out_map=swap_out_map,
+                                                copy_map=copy_map)
 
         async def __long_context_single_forward(inputs):
             """one large sequence."""
@@ -278,7 +282,7 @@ class AutoModelAgent:
 
         return next_token_ids
 
-    async def _async_step_background(self, inputs: ModelInputs, swap_in_map: Dict, swap_out_map: Dict,
+    async def _async_step_background(self, inputs: ModelInputs, swap_in_map: Dict, swap_out_map: Dict, copy_map: Dict,
                                      all_ids: torch.Tensor, guided_input_ids: torch.Tensor,
                                      sampling_inputs: SamplingInputs, num_appendable_ids: torch.LongTensor,
                                      num_ignore_eos: torch.LongTensor, loop_count: int, return_logits: bool,
@@ -322,6 +326,7 @@ class AutoModelAgent:
             output = await self._async_model_forward(inputs,
                                                      swap_in_map=swap_in_map,
                                                      swap_out_map=swap_out_map,
+                                                     copy_map=copy_map,
                                                      return_logits=return_logits)
             logits = output['logits']
             logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
@@ -359,6 +364,7 @@ class AutoModelAgent:
             if is_decoding and idx < loop_count - 1:
                 swap_in_map = dict()
                 swap_out_map = dict()
+                copy_map = dict()
                 inputs.model_metas = model_metas
                 __update_inputs(next_token_ids)
 
@@ -516,8 +522,8 @@ class BaseModelAgent(AutoModelAgent):
         with self.all_context():
             self.cache_engine = CacheEngine(self.cache_config, self.model_config, self.tp_rank, world_size=self.tp)
 
-    def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
-        cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+    def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap, copy_map: SwapMap):
+        cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
         output = model_forward(
             self.patched_model,
             inputs,
@@ -527,7 +533,7 @@ class BaseModelAgent(AutoModelAgent):
         )
         return output
 
-    async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+    async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap, copy_map: SwapMap):
         """model forward.
 
         Args:
@@ -535,7 +541,7 @@ class BaseModelAgent(AutoModelAgent):
             swap_in_map (SwapMap): Cache maps to swap in.
             swap_out_map (SwapMap): Cache maps to swap out.
         """
-        output = self._forward_impl(inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+        output = self._forward_impl(inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
         await asyncio.sleep(0)
         return output
 

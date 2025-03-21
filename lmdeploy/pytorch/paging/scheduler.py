@@ -156,7 +156,9 @@ class Scheduler:
             if (len(running) > 0 and token_count + seq.num_token_ids > self.cache_config.max_prefill_token_num):
                 break
 
-            self.block_trie.match(seq)
+            cur_copy_map = self.block_trie.match(seq)
+            if len(cur_copy_map) > 0:
+                copy_map.update(cur_copy_map)
 
             if not __evict_for_seq(seq, waiting):
                 break
@@ -206,7 +208,9 @@ class Scheduler:
                 continue
 
             self.block_manager.allocate(seq, prealloc_size)
-            self.block_trie.allocate(seq)
+            cur_copy_map = self.block_trie.allocate(seq)
+            if len(cur_copy_map):
+                copy_map.update(cur_copy_map)
 
         return self.running, swap_in_map, swap_out_map, copy_map
 
