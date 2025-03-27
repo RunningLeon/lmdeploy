@@ -406,7 +406,7 @@ class HistoryMultiModals:
     def has_data(self, start: int, end: int) -> bool:
         """whether has multimodal data in [start, end)"""
         return any([s < end and e > start for s, e, _ in self._mm_ranges])
-    
+
     def get_hash_values(self, start: int, end: int):
         """get multimodals hash values that from [start, end)"""
         mm_hash_values = []
@@ -631,7 +631,6 @@ class SchedulerSequence:
 
         # update multimodals
         if multimodals is not None:
-            print(multimodals)
             multimodals = HistoryMultiModals.update_multimodals(multimodals, self._num_history_ids)
             self.history_multimodals.add_inputs(multimodals)
 
@@ -676,11 +675,11 @@ class SchedulerSequence:
             self._num_cross = self.history_multimodals.get_encoder_len(self._num_history_ids, num_all_ids)
 
     def __repr__(self):
-        repr = f'SchedulerSequence(seq_id={self.seq_id}, histokens_num={len(self.history_cache)}, status={self.status}, history_len={self.history_len}, _num_token_ids={self._num_token_ids}, num_new_tokens={self.num_new_tokens},'
-        repr += f'all_tokens={self.history_cache[:self.num_all_ids]}, '
-        repr += f'num_all_ids={self.num_all_ids}, num_blocks={self.num_blocks}, blocks={self.logical_blocks.get_real_blocks()}, '
-        repr += f'multimodals_ranges={self.history_multimodals._mm_ranges}, last_shared_node={getattr(self.logical_blocks, "last_shared_node", None)}'
+        repr = f'SchedulerSequence(seq_id={self.seq_id}, session_id={self.session_id}, history_len={self.history_len}, '
+        repr += f'num_all_ids={self.num_all_ids}, status={self.status}, num_new_tokens={self.num_new_tokens}, '
+        repr += f'num_blocks={self.num_blocks}, multimodals_ranges={self.history_multimodals._mm_ranges}, '
+        repr += f'last_shared_node={getattr(self.logical_blocks, "last_shared_node", None)})'
         return repr
-    
+
     def __str__(self):
         return self.__repr__()

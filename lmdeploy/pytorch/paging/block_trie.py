@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import heapq
-from typing import Dict, List, Set, Tuple, Optional, Union, Any
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -11,12 +11,12 @@ from lmdeploy.utils import get_logger, logging_timer
 from ..config import CacheConfig
 from .block_manager import BaseBlockManager
 
-
 logger = get_logger('lmdeploy')
+
 
 @logging_timer('hash_tokens', logger)
 def hash_block_tokens(tokens: np.ndarray, mm_hash_values=None, ranges=None):
-    """hash func """
+    """hash func."""
     hash_data = ('random', ) + tuple(tokens.tolist())
     if mm_hash_values is not None:
         hash_data = hash_data + tuple(mm_hash_values)
@@ -27,31 +27,33 @@ def hash_block_tokens(tokens: np.ndarray, mm_hash_values=None, ranges=None):
 
 
 class Children:
-    """Children class to make unfull nodes with same hashkey can reference the same parent node"""
+    """Children class to make unfull nodes with same hashkey can reference the
+    same parent node."""
+
     def __init__(self):
         self._children = defaultdict(set)
-    
+
     def __getitem__(self, key: Any, *args, **kwargs) -> Optional[Union['Node', Set['Node']]]:
         subset = self._children[key]
         num = len(subset)
         if num == 1:
             subset = list(subset)[0]
         return subset
-    
+
     def __setitem__(self, key: Any, value: 'Node', *args, **kwargs):
         assert key == value.hash_key
         self._children[key].add(value)
 
-    def __contains__(self, key: Any)->bool:
-        """Check if exists any node with key"""
+    def __contains__(self, key: Any) -> bool:
+        """Check if exists any node with key."""
         return key in self._children and len(self._children[key]) > 0
-    
+
     def __len__(self):
-        """Get number of all children nodes"""
+        """Get number of all children nodes."""
         return sum([len(sub) for sub in self._children.values()])
-    
+
     def pop(self, node: 'Node'):
-        """Remove a node if exists"""
+        """Remove a node if exists."""
         if node is not None and node.hash_key in self._children:
             subset = self._children[node.hash_key]
             if node in subset:
@@ -61,39 +63,25 @@ class Children:
 
 
 class Leaves:
-    """Leaves"""
+    """Leaves."""
+
     def __init__(self):
         self._leaves: Dict[int, Set['Node']] = defaultdict(set)
-    
+
     def add(self, node: 'Node'):
-        assert node.parent is not None 
+        assert node.parent is not None
         assert len(node.children) == 0
         self._leaves[node.block].add(node)
 
     def remove(self, node: 'Node'):
-        """if a leaf if exists"""
+        """if a leaf if exists."""
         if node.block in self._leaves:
             self._leaves[node.block].discard(node)
             if len(self._leaves[node.block]) == 0:
                 self._leaves.pop(node.block)
 
-    def pop(self):
-        """random pop a leaf node"""
-        blocks = []
-        node = None
-        for blk, subset in self._leaves.items():
-            if len(subset) > 0:
-                node = subset.pop()
-            if len(subset) == 0:
-                blocks.append(blk)
-            if node is not None:
-                break
-        _ = [self._leaves.pop(blk) for blk in blocks]
-        return node
-        
-
     def purge(self, allocator, ref_leaves: List['Node']):
-        """Purge reduandent leaves when create new unfull nodes"""
+        """Purge reduandent leaves when create new unfull nodes."""
 
         free_leaves = []
         for ref_leaf in ref_leaves:
@@ -111,13 +99,13 @@ class Leaves:
             self.remove(leaf)
             leaf.parent = None
 
-        deduce_blocks = [l.block for l in free_leaves]
+        deduce_blocks = [leaf.block for leaf in free_leaves]
         if len(deduce_blocks) > 0:
             allocator.free(np.array(deduce_blocks))
 
     @logging_timer('GetCandidates', logger)
     def candidates(self, allocator):
-        """Get candidate leaves to evict"""
+        """Get candidate leaves to evict."""
         blocks = [block for block, subset in self._leaves.items() if len(subset) > 0]
         ref_cnt = allocator.get_ref_count(np.array(blocks))
         free_blocks = [b for b, ref in zip(blocks, ref_cnt) if ref == len(self._leaves[b])]
@@ -140,17 +128,17 @@ class Leaves:
                 candidates.append(leaves[0])
                 # remove rest leaves on the same block
                 evicted_leaves.extend(leaves[1:])
-            
+
             for leaf in evicted_leaves:
                 self.remove(leaf)
                 leaf.parent = None
             evicted_blocks = [leaf.block for leaf in evicted_leaves]
-            
+
         return candidates, evicted_blocks
-    
+
     def __contains__(self, node: 'Node'):
         return node.block in self._leaves and node in self._leaves[node.block]
-    
+
     def __len__(self):
         return sum([len(subset) for subset in self._leaves.values()])
 
@@ -159,7 +147,7 @@ class Leaves:
         repr += f'per block num={[(b, len(subset)) for b, subset in self._leaves.items() if len(subset) > 0]}, '
         repr += f'leaves={[(b, subset) for b, subset in self._leaves.items() if len(subset) > 0]})'
         return repr
-    
+
     def __str__(self):
         return self.__repr__()
 
@@ -198,12 +186,17 @@ class Node:
 
     def clone(self):
         """clone node."""
-        ret = Node(self.hash_key, self.block, self.tokens, num_matched=self.num_matched, is_full=self.is_full, mm_hashes=self.mm_hashes)
+        ret = Node(self.hash_key,
+                   self.block,
+                   self.tokens,
+                   num_matched=self.num_matched,
+                   is_full=self.is_full,
+                   mm_hashes=self.mm_hashes)
         ret._parent = self._parent
         # need add the new child to the parent.children
         ret._parent.children[self.hash_key] = ret
         return ret
-    
+
     def match_child(self, tokens: np.ndarray, mm_hash_values=None, ranges=None):
         hash_key = hash_block_tokens(tokens, mm_hash_values, ranges)
         matched_child = None
@@ -214,20 +207,20 @@ class Node:
             if child.mm_hashes == mm_hash_values and np.array_equal(tokens, child.tokens):
                 matched_child = child
         return matched_child, hash_key
-    
+
     def __lt__(self, other):
         return True
 
     def __le__(self, other):
         return True
-    
+
     def __repr__(self):
         repr = f'Node(num_matched={self.num_matched}, is_full={self.is_full}, '
         repr += f'block={self.block}, tokens={self.tokens.tolist()}, '
         repr += f'hash_key={self.hash_key}, mm_hashes={self.mm_hashes}, '
         repr += f'children_num={len(self.children)}, is_root={self.parent is None})'
         return repr
-    
+
     def __str__(self):
         return self.__repr__()
 
@@ -255,9 +248,9 @@ class BlockTrie:
 
     @property
     def roots(self):
-        """all roots"""
+        """all roots."""
         return self._roots.values()
-    
+
     @logging_timer('BlockTrie_Match', logger)
     def match(self, seq: SchedulerSequence) -> Dict[int, int]:
         """match sequence and cache."""
@@ -373,7 +366,7 @@ class BlockTrie:
             self.allocator.add_ref_count(np.array(blocks), 1)
         if len(free_blocks) > 0:
             self.allocator.free(np.array(free_blocks))
-    
+
     def _match_multimodals(self, seq: SchedulerSequence) -> Dict[int, int]:
         """match sequence and cache."""
         copy_map = {}
@@ -384,7 +377,7 @@ class BlockTrie:
         matched_blocks = []
         logical_blocks = seq.logical_blocks
         # TODO only match prefilled tokens ?
-        num_all_ids = seq.num_all_ids - seq.num_new_tokens # only match prefill tokens
+        num_all_ids = seq.num_all_ids - seq.num_new_tokens  # only match prefill tokens
         curr: Node = getattr(logical_blocks, 'last_shared_node', None)
         if curr is None:
             curr = self.get_root(seq.adapter_name)
@@ -400,15 +393,16 @@ class BlockTrie:
             # back to parent node for rebuilding
             curr = curr.parent
         elif (curr.num_matched + block_size) > num_all_ids:
-            # if the unfull block doese not contain vision token
+            # if the unfull block does not contain vision token
             mm_hash_values, _ = seq.history_multimodals.get_hash_values(curr.num_matched, num_all_ids)
             if not seq.history_multimodals.has_data(curr.num_matched, num_all_ids):
                 return copy_map
 
         num_matched = curr.num_matched
         last_node = curr
+
         def __match_success(node: Node):
-            """match full filled blocks or unfull blocks with multimodals"""
+            """match full filled blocks or unfull blocks with multimodals."""
             nonlocal curr, num_matched, prev_node, last_node
 
             logger.info(f'Matched token range=({num_matched}, {node.num_matched}), {node}')
@@ -416,8 +410,6 @@ class BlockTrie:
             if not node.is_full:
                 # when match an unfull block, need to copy to reuse the kv cache in that block
                 block = self.allocator.allocate(1, device='gpu').item()
-                logger.info(
-                    f'Create new copy block {node.block} -> {block}(ref={self.allocator.get_ref_count(np.array([block]))}) now free blocks={self.block_manager.get_num_free_gpu_blocks()}')
                 copy_map[node.block] = block
                 # directly create new unfull child, multiple unfull nodes
                 # with same hash_key can be added to parent.children
@@ -431,9 +423,9 @@ class BlockTrie:
             prev_node = curr
             curr = node
             num_matched += block_size
-        
+
         matched_step = num_matched
-        
+
         logger.info(f'Matching {seq} last node={curr}')
         while num_matched < num_all_ids:
             mm_hash_values, mm_multi_ends = seq.history_multimodals.get_hash_values(num_matched,
@@ -448,8 +440,7 @@ class BlockTrie:
                 if len(mm_multi_ends) == 0 or mm_multi_ends[-1][1] != (num_matched + block_size):
                     mm_multi_ends.append((mm_hash_values, num_matched + block_size))
                 # filter last time processed ends
-                mm_multi_ends = [(key, end) for key, end in mm_multi_ends
-                                 if prev_node.num_matched < end <= num_all_ids]
+                mm_multi_ends = [(key, end) for key, end in mm_multi_ends if prev_node.num_matched < end <= num_all_ids]
                 mm_multi_ends.reverse()
                 matched_node = None
 
@@ -458,7 +449,7 @@ class BlockTrie:
                     matched_node, _ = curr.match_child(tokens, cur_mm_hash_values, range(num_matched, cur_matched_end))
                     if matched_node is not None:
                         if (not matched_node.is_full) and self.block_manager.get_num_free_gpu_blocks() < 1:
-                            logger.info(f'BAD] No free gpu blocks for seq {seq.seq_id} total={self.block_manager.num_gpu_blocks}')
+                            logger.warning(f'No free gpu blocks for {seq}')
                             matched_node = None
                         break
 
@@ -494,14 +485,14 @@ class BlockTrie:
 
         block_size = self.block_size
         logical_blocks = seq.logical_blocks
-         # TODO only match prefilled tokens ?
-        num_all_ids = seq.num_all_ids - seq.num_new_tokens # only match prefill tokens
+        # TODO only match prefilled tokens ?
+        num_all_ids = seq.num_all_ids - seq.num_new_tokens  # only match prefill tokens
         curr: Node = getattr(logical_blocks, 'last_shared_node', None)
 
         if curr is None:
             curr = self.get_root(seq.adapter_name)
-        
-        # prev_node is used to 
+
+        # prev_node is used to
         prev_node = curr
         logical_blocks.last_shared_node = curr
         logger.info(f'Allocate {seq} curr={curr}')
@@ -510,14 +501,14 @@ class BlockTrie:
             # need add to leaves at first because will back to parent later
             self.leaves.add(curr)
             assert curr.parent is not None, 'unfull block should not be root node'
-            # if the unfull block doese not contain vision token
+            # if the unfull block does not contain vision token
             if (curr.parent.num_matched + block_size) > num_all_ids:
                 if not seq.history_multimodals.has_data(curr.num_matched, num_all_ids):
                     return
             # back to parent node for rebuilding
             curr = curr.parent
         elif (curr.num_matched + block_size) > num_all_ids:
-            # if the unfull block doese not contain vision token
+            # if the unfull block does not contain vision token
             if not seq.history_multimodals.has_data(curr.num_matched, num_all_ids):
                 return
 
@@ -530,7 +521,8 @@ class BlockTrie:
 
         blocks = []
         free_blocks = []
-        redundent_ref_nodes = []
+        redundant_ref_nodes = []
+
         def __add_unfull_nodes(parent: Node, multi_segments: List[Tuple[Tuple[str], int]]):
             # add multiple nodes of un-full blocks
             nonlocal free_blocks, blocks
@@ -541,25 +533,27 @@ class BlockTrie:
                 curr_tokens = seq.history_cache[num_matched:cur_matched_end]
                 is_full = len(curr_tokens) == block_size
                 assert not is_full
-                hash_key = hash_block_tokens(curr_tokens, cur_mm_hash_values, ranges=range(num_matched, cur_matched_end))
+                hash_key = hash_block_tokens(curr_tokens,
+                                             cur_mm_hash_values,
+                                             ranges=range(num_matched, cur_matched_end))
                 block = logical_blocks[block_id]
                 # multiple unfull nodes with same hash_key can be added to parent.children
-                has_redundent = False
+                has_redundant = False
                 if hash_key in parent.children:
-                    has_redundent = True
+                    has_redundant = True
                 child = Node(hash_key=hash_key,
-                                block=block,
-                                tokens=curr_tokens,
-                                num_matched=cur_matched_end,
-                                is_full=False,
-                                mm_hashes=cur_mm_hash_values)
+                             block=block,
+                             tokens=curr_tokens,
+                             num_matched=cur_matched_end,
+                             is_full=False,
+                             mm_hashes=cur_mm_hash_values)
                 child.parent = parent
                 self.num_nodes += 1
                 logger.info(f'allocate num_matched={num_matched} add [unfull] node={child}')
                 blocks.append(child.block)
                 unfull_nodes.append(child)
-                if has_redundent:
-                    redundent_ref_nodes.append(child)
+                if has_redundant:
+                    redundant_ref_nodes.append(child)
 
             return unfull_nodes
 
@@ -572,7 +566,8 @@ class BlockTrie:
             assert is_full
             block = logical_blocks[block_id]
             parent = node
-            matched_child, hash_key = parent.match_child(curr_tokens, mm_hash_values, range(num_matched, num_matched+block_size))
+            matched_child, hash_key = parent.match_child(curr_tokens, mm_hash_values,
+                                                         range(num_matched, num_matched + block_size))
             if matched_child is not None:
                 node = matched_child
                 free_blocks.append(block)
@@ -588,7 +583,7 @@ class BlockTrie:
                 node.parent = parent
                 logger.info(f'allocate num_matched={num_matched}  add [full] node={node}')
                 self.num_nodes += 1
-                
+
             blocks.append(node.block)
             return node, True
 
@@ -610,7 +605,7 @@ class BlockTrie:
                     elif num_matched + block_size <= num_all_ids:
                         full_mm_hash_values = mm_hash_values
 
-                mm_multi_ends = [key_end for key_end in mm_multi_ends if key_end[1] > prev_node.num_matched] 
+                mm_multi_ends = [key_end for key_end in mm_multi_ends if key_end[1] > prev_node.num_matched]
                 if len(mm_multi_ends) > 0:
                     cur_unfull_nodes = __add_unfull_nodes(curr, mm_multi_ends)
                     if len(cur_unfull_nodes) > 0:
@@ -627,9 +622,9 @@ class BlockTrie:
             num_matched += block_size
             block_id += 1
 
-        # remove redundent leaves if exist
-        # logger.info(f'redundent ref nodes={redundent_ref_nodes}')
-        # self.leaves.purge(self.allocator, redundent_ref_nodes)
+        # remove redundant leaves if exist
+        # logger.info(f'redundant ref nodes={redundant_ref_nodes}')
+        # self.leaves.purge(self.allocator, redundant_ref_nodes)
         logical_blocks.last_shared_node = last_node
 
         # add leaf nodes
@@ -672,7 +667,7 @@ class BlockTrie:
         leaves, pre_evicted_blocks = self.leaves.candidates(self.allocator)
         if len(leaves) == 0:
             return 0
-        
+
         # make heap
         leave_blocks = np.array([leaf.block for leaf in leaves])
         access_times = self.allocator.get_access_time(leave_blocks)
@@ -693,14 +688,12 @@ class BlockTrie:
                     parent.parent = None
                     logger.info(f'Evict multimodal node={parent}')
                     parent = tmp_parent
-                    logger.info(f'Neext multimodal node={parent}')
+                    logger.info(f'Next multimodal node={parent}')
 
-            if len(parent.children) == 0 and not parent in self.roots:
+            if len(parent.children) == 0 and parent not in self.roots:
                 __add_leaf(leaves, parent)
 
         evicted_blocks.extend(pre_evicted_blocks)
         self.allocator.free(np.array(evicted_blocks))
         self.num_nodes -= len(evicted_blocks)
-        logger.info(f'Evict final blocks={evicted_blocks} refs={self.allocator.get_ref_count(np.array(evicted_blocks))}')
-        logger.info(f'self.leaves={self.leaves}')
         return len(evicted_blocks)
