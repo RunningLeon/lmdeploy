@@ -130,11 +130,12 @@ class LogicalAllocator:
 
     def free(self, blocks: np.ndarray):
         """Free logical block."""
-
         self.add_ref_count(blocks, -1)
         self.update_access_time(blocks)
         ref_count = self.get_ref_count(blocks)
         freed_blocks = blocks[ref_count == 0]
+        # only count unique block
+        freed_blocks = np.unique(freed_blocks)
         num_freed_blocks = len(freed_blocks)
         if num_freed_blocks <= 0:
             return
