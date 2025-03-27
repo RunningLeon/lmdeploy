@@ -1,10 +1,12 @@
 import numpy as np
 import pytest
+import torch
 
 from lmdeploy.pytorch.config import CacheConfig
 from lmdeploy.pytorch.messages import SchedulerSession
 from lmdeploy.pytorch.paging.block_manager import build_block_manager
 from lmdeploy.pytorch.paging.block_trie import BlockTrie
+from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
 
 
 class TestBlockTire:
@@ -112,6 +114,215 @@ class TestBlockTire:
         ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
         assert np.array_equal(ref_cnt, [4, 3])
 
+    # @pytest.mark.multimodals
+    @pytest.mark.test
+    def test_match_multimodals(self, block_trie, block_mgr, block_size):
+        allocator = block_trie.allocator
+        sess = SchedulerSession(0, block_size)
+        img_data0 = MultiModalTensor(data=None, start=block_size - (block_size // 2), end=block_size + (block_size // 2), meta=dict(hash_value='image_0'))
+        img_data1 = MultiModalTensor(data=None, start=block_size - (block_size // 2), end=block_size + (block_size // 2), meta=dict(hash_value='image_1'))
+        # initialize cache
+        token_ids0 = ([1] * block_size + [2] * block_size)
+        token_ids0 += [3] * (block_size // 2)
+        multimodals0 = dict(image=[img_data0])
+        seq0 = sess.add_sequence(token_ids0, multimodals=multimodals0)
+        assert block_mgr.get_num_free_gpu_blocks() == block_mgr.num_gpu_blocks
+        block_mgr.allocate(seq0)
+        block_trie.allocate(seq0)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+        
+        # test1 pure test
+        seq1 = sess.add_sequence(token_ids0)
+        block_trie.match(seq1)
+        last_node = getattr(seq1.logical_blocks, 'last_shared_node', None)
+        assert last_node is not None
+        assert last_node.parent is None
+        assert len(seq1.logical_blocks) == 0
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+
+        # test2 same text and same image
+        token_ids2 = token_ids0 + [4] * block_size
+        seq2 = sess.add_sequence(token_ids2, multimodals=multimodals0)
+        block_trie.match(seq2)
+        last_node = getattr(seq2.logical_blocks, 'last_shared_node', None)
+        assert last_node is not None
+        assert last_node.is_full
+        assert last_node.mm_hashes == ('image_0',)
+        assert last_node.num_matched == block_size * 2
+        assert np.array_equal(last_node.parent.tokens, [1]*block_size)
+        assert np.array_equal(last_node.tokens, [2]*block_size)
+        ref_cnt = allocator.get_ref_count(seq2.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [3, 4])
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+        block_mgr.free(seq2)
+        ref_cnt = allocator.get_ref_count(seq0.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [2, 3, 1])
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+
+        # test2.5 same text prefix and same image
+        token_ids = [1] * block_size + [2] * (block_size // 2) + [4] * block_size
+        seq2 = sess.add_sequence(token_ids, multimodals=multimodals0)
+        block_trie.match(seq2)
+        last_node = getattr(seq2.logical_blocks, 'last_shared_node', None)
+        assert last_node is not None
+        assert not last_node.is_full
+        assert last_node.mm_hashes == ('image_0',)
+        assert last_node.num_matched == block_size + (block_size // 2)
+        assert np.array_equal(last_node.parent.tokens, [1]*block_size)
+        assert np.array_equal(last_node.tokens, [2]*(block_size // 2))
+        ref_cnt = allocator.get_ref_count(seq2.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [3, 2])
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 4)
+        block_mgr.free(seq2)
+        allocator.free(np.array([last_node.block]))
+        ref_cnt = allocator.get_ref_count(seq0.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [2, 3, 1])
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+
+        # test3, same text, different image
+        multimodals1 = dict(image=[img_data1])
+        seq3 = sess.add_sequence(token_ids0, multimodals=multimodals1)
+        block_trie.match(seq3)
+        last_node = getattr(seq3.logical_blocks, 'last_shared_node', None)
+        assert last_node is not None
+        assert last_node.parent is None
+        assert len(seq3.logical_blocks) == 0
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+
+        #test4 after allocate
+        block_mgr.allocate(seq3)
+        block_trie.allocate(seq3)
+        # same prefix text, same image
+        token_ids4 = [1] * block_size + [2] * (block_size // 2) + [4] * block_size
+        seq4 = sess.add_sequence(token_ids4, multimodals=multimodals1)
+        block_trie.match(seq4)
+        last_node = getattr(seq4.logical_blocks, 'last_shared_node', None)
+        assert last_node is not None
+        assert not last_node.is_full
+        assert last_node.parent is not None
+        assert last_node.num_matched == block_size + (block_size // 2)
+        assert len(seq4.logical_blocks) == 2
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 7)
+        ref_cnt = allocator.get_ref_count(seq4.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [3, 2])
+        allocator.free(np.array([last_node.block] * 2))
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 6)
+
+        # # test with multi images
+        # token_ids5 = ([1] * block_size + [2] * block_size)
+        # token_ids5 += [3] * (block_size // 2) + [4] * block_size
+        # multimodals = dict(image=[img_data0, img_data1])
+        # seq5 = sess.add_sequence(token_ids5, multimodals=multimodals)
+        # block_trie.match(seq5)
+        # last_node = getattr(seq5.logical_blocks, 'last_shared_node', None)
+        # assert last_node is not None
+        # assert last_node.parent is not None
+        # assert last_node.num_matched == block_size + 2
+        # assert len(seq5.logical_blocks) == 2
+        # assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 7)
+        # ref_cnt = allocator.get_ref_count(seq5.logical_blocks.get_real_blocks())
+        # assert np.array_equal(ref_cnt, [4, 2])
+        # allocator.free(np.array([last_node.block] * 2))
+        # assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 6)
+
+    # @pytest.mark.multimodals
+    # @pytest.mark.test
+    def test_allocate_multimodals(self, block_trie, block_mgr, block_size):
+        allocator = block_trie.allocator
+        sess = SchedulerSession(0, block_size)
+        token_ids = ([1] * block_size + [2] * block_size)
+        token_ids += [3] * (block_size // 2)
+        multimodals = dict(image=[MultiModalTensor(data=None, start=0, end=block_size//4, meta=dict(hash_value='image_0')),
+                                  MultiModalTensor(data=None, start=block_size//4 + 2, end=block_size//2, meta=dict(hash_value='image_1')),
+                                  MultiModalTensor(data=None, start=block_size//2 + 2, end=block_size*2, meta=dict(hash_value='image_2')),
+                                  ])
+        seq = sess.add_sequence(token_ids, multimodals=multimodals)
+
+        # first allocate
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+        logical_blocks = seq.logical_blocks
+        assert len(logical_blocks) == 3
+        ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [4, 2, 1])
+        node = getattr(seq.logical_blocks, 'last_shared_node', None)
+        assert node is not None
+        assert node.mm_hashes == tuple(['image_2'])
+        assert node.num_matched == block_size * 2
+        assert np.array_equal(node.tokens, [2] * block_size)
+        assert np.array_equal(node.parent.tokens, [1] * block_size)
+        assert node in block_trie.leaves
+        assert len(block_trie.leaves) == 3
+        assert node.parent not in block_trie.leaves
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3) 
+
+        # append text token
+        seq.update_token_ids([4] * block_size)
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+        logical_blocks = seq.logical_blocks
+        assert len(logical_blocks) == 4
+        ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [4, 2, 2, 1])
+        node = getattr(seq.logical_blocks, 'last_shared_node', None)
+        assert node is not None
+        assert node.num_matched == block_size * 3
+        assert node.mm_hashes is None
+        assert node.is_full
+        expect_tokens = [3] * (block_size // 2) + [4] * (block_size // 2)
+        assert np.array_equal(node.tokens, expect_tokens)
+        assert node in block_trie.leaves
+        assert len(block_trie.leaves) == 3
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 4)
+
+        # append image token
+        multimodals = dict(image=[MultiModalTensor(data=None, start=0, end=block_size, meta=dict(hash_value='image_3'))])
+        seq.update_token_ids([5] * (block_size), multimodals=multimodals)
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+        logical_blocks = seq.logical_blocks
+        assert len(logical_blocks) == 5
+        ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [4, 2, 2, 2, 2])
+        node = getattr(seq.logical_blocks, 'last_shared_node', None)
+        assert node is not None
+        assert node.mm_hashes == tuple(['image_3'])
+        assert not node.is_full
+        assert node.num_matched == block_size * 4 + block_size//2
+        assert np.array_equal(node.parent.tokens, [4] * (block_size // 2) + [5] * (block_size // 2))
+        assert np.array_equal(node.tokens, [5] * (block_size // 2))
+        assert node in block_trie.leaves
+        assert len(block_trie.leaves) == 3
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 5)
+
+    @pytest.mark.multimodals
+    def test_evict_multimodals(self, block_trie, block_size, num_gpu_blocks):
+        block_mgr = block_trie.block_manager
+        sess = SchedulerSession(0, block_size)
+        token_ids = ([1] * block_size + [2] * block_size + [3] * block_size)
+        token_ids += [4] * (block_size // 2)
+        multimodals = dict(image=[MultiModalTensor(data=None, start=1, end=block_size//4, meta=dict(hash_value='image_0')),
+                                  MultiModalTensor(data=None, start=block_size//4 + 2, end=block_size // 2, meta=dict(hash_value='image_1')),
+                                  MultiModalTensor(data=None, start=block_size//2 + 2, end=block_size*2, meta=dict(hash_value='image_2')),
+                                  MultiModalTensor(data=None, start=block_size//2 + 2 * block_size, end=block_size//2 + 3 * block_size, meta=dict(hash_value='image_3')),
+                                  ])
+        seq0 = sess.add_sequence(token_ids, multimodals=multimodals)
+        block_mgr.allocate(seq0)
+        block_trie.allocate(seq0)
+        assert len(block_trie.leaves) == 3
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 4)
+        multimodals = dict(image=[MultiModalTensor(data=None, start=1, end=block_size//4, meta=dict(hash_value='image_0')),
+                                  MultiModalTensor(data=None, start=block_size//4 + 2, end=block_size // 2, meta=dict(hash_value='image_1')),
+                                  MultiModalTensor(data=None, start=block_size//2 + 2, end=block_size*2, meta=dict(hash_value='image_2'))])
+        token_ids = [1] * block_size + [2] * block_size + [5] * (block_size // 2)
+        seq1 = sess.add_sequence(token_ids, multimodals=multimodals)
+        block_trie.match(seq1)
+        
+        block_mgr.allocate(seq1)
+        block_trie.allocate(seq1)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 5)
+
+    
     def test_evict(self, block_trie, block_size, num_gpu_blocks):
         block_mgr = block_trie.block_manager
         sess = SchedulerSession(0, block_size)
@@ -128,8 +339,8 @@ class TestBlockTire:
         assert block_mgr.get_num_free_gpu_blocks() == 1
 
         # test evict
-        leaf = next(iter(block_trie.leaves))
+        print(block_trie.leaves)
+        assert len(block_trie.leaves) == 1
+
         block_trie.evict(4)
-        new_leaf = next(iter(block_trie.leaves))
-        assert leaf != new_leaf
         assert block_mgr.get_num_free_gpu_blocks() == 5

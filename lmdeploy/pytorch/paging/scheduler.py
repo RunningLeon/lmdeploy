@@ -155,12 +155,26 @@ class Scheduler:
 
             if (len(running) > 0 and token_count + seq.num_token_ids > self.cache_config.max_prefill_token_num):
                 break
-
-            self.block_trie.match(seq)
+            # need at least one block for unfull node to copy
+            cur_copy_map = {}
+            if self.block_manager.get_num_free_gpu_blocks() > 0:
+                cur_copy_map = self.block_trie.match(seq)
+            logger.info(f'After block match for seq={seq} freeblock={self.block_manager.get_num_free_gpu_blocks()}')
 
             if not __evict_for_seq(seq, waiting):
+                # need to free to
+                last_shared_node = getattr(seq.logical_blocks, 'last_shared_node', None)
+                self.block_manager.free(seq)
+
+                if last_shared_node is not None and last_shared_node.parent is not None:
+                    import numpy as np
+                    self.block_manager.allocator.free(np.array([last_shared_node.block]))
+
+                logger.info(f'Schedule prefill no free block for seq={seq}')
                 break
 
+            if len(cur_copy_map) > 0:
+                copy_map.update(cur_copy_map)
             # allocate session memory
             self.block_manager.allocate(seq)
             _to_running(seq)
@@ -200,24 +214,36 @@ class Scheduler:
                 self.block_manager.free(seq)
                 seq.set_step(0)
                 continue
-
             if not __evict_for_seq(seq):
+                logger.debug(f'No free blocks for seq={seq}')
+                # running to waiting, this means seq in decoding stage can be schedule in next prefill
                 self._set_message_status(seq, MessageStatus.WAITING)
                 continue
-
+            logger.info(f'Allocate blocks for seq={seq} prealloc_size={prealloc_size}')
             self.block_manager.allocate(seq, prealloc_size)
+            logger.info(f'Before block trie allocate seq={seq}')
             self.block_trie.allocate(seq)
+            logger.info(f'After block trie allocate seq={seq}')
 
         return self.running, swap_in_map, swap_out_map, copy_map
 
     def schedule(self, is_prefill: bool, prealloc_size: int = 0):
+        logger.info(f'enter schedule prefill={is_prefill} freeblock={self.block_manager.get_num_free_gpu_blocks()}'
+                    f'/{self.block_manager.num_gpu_blocks}')
         """Schedule inputs for next steps."""
         if is_prefill:
             output = self._schedule_prefill()
         else:
             output = self._schedule_decoding(prealloc_size)
         running, swap_in_map, swap_out_map, copy_map = output
-
+        if len(running) == 0:
+            logger.info(f'schedule prefill={is_prefill} no runnings')
+        else:
+            for seq in running:
+                logger.info(f'schedule prefill={is_prefill} seq ={seq}, resp={getattr(seq, "resp", None)}')
+        logger.info(f'out schedule running num={len(running)} '
+                    f'freeblock={self.block_manager.get_num_free_gpu_blocks()}/'
+                    f'{self.block_manager.num_gpu_blocks}')
         return SchedulerOutput(running=running, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
 
     def _set_session_status(self, session_id: int, status: MessageStatus):
