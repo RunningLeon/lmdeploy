@@ -1,6 +1,7 @@
 # yapf: disable
 import pytest
 import torch
+import numpy as np
 
 from lmdeploy.pytorch.messages import SchedulerSession
 from lmdeploy.pytorch.paging.block_manager import DefaultBlockManager, WindowBlockManager
@@ -45,6 +46,22 @@ class TestAllocator:
         allocator.free(blocks)
         assert allocator.get_num_free_blocks() == num_blocks - block_size
         allocator.free(blocks)
+        assert allocator.get_num_free_blocks() == num_blocks
+        assert gpu_allocator.get_num_free_blocks() == num_gpu_blocks
+        assert cpu_allocator.get_num_free_blocks() == num_cpu_blocks
+
+        # test free non-unique blocks
+        block_size = 4
+        blocks = allocator.allocate(block_size, 'gpu')
+        assert len(blocks) == block_size
+        ref_cnt0 = allocator.get_ref_count(blocks)
+        assert np.array_equal(ref_cnt0, np.ones(block_size))
+        # let ref=2 of block0, block1
+        allocator.add_ref_count(blocks[:2], 1)
+        ref_cnt1 = allocator.get_ref_count(blocks)
+        assert np.array_equal(ref_cnt1, [2, 2] + [1]*(block_size-2))
+        free_blocks = np.concatenate([blocks, blocks[:2]])
+        allocator.free(free_blocks)
         assert allocator.get_num_free_blocks() == num_blocks
         assert gpu_allocator.get_num_free_blocks() == num_gpu_blocks
         assert cpu_allocator.get_num_free_blocks() == num_cpu_blocks
