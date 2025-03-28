@@ -15,13 +15,11 @@ logger = get_logger('lmdeploy')
 
 
 @logging_timer('hash_tokens', logger)
-def hash_block_tokens(tokens: np.ndarray, mm_hash_values=None, ranges=None):
+def hash_block_tokens(tokens: np.ndarray, mm_hash_values=None):
     """hash func."""
     hash_data = ('random', ) + tuple(tokens.tolist())
     if mm_hash_values is not None:
         hash_data = hash_data + tuple(mm_hash_values)
-    if ranges is not None:
-        hash_data = hash_data + tuple(ranges)
     hash_key = hash(hash_data)
     return hash_key
 
@@ -222,9 +220,9 @@ class Node:
         ret._parent.children[self.hash_key] = ret
         return ret
 
-    def match_child(self, tokens: np.ndarray, mm_hash_values=None, ranges=None):
+    def match_child(self, tokens: np.ndarray, mm_hash_values=None):
         """check if any child is matched."""
-        hash_key = hash_block_tokens(tokens, mm_hash_values, ranges)
+        hash_key = hash_block_tokens(tokens, mm_hash_values)
         matched_child = None
         if hash_key in self.children:
             child = self.children[hash_key]
@@ -568,8 +566,7 @@ class BlockTrie:
                 is_full = len(curr_tokens) == block_size
                 assert not is_full
                 hash_key = hash_block_tokens(curr_tokens,
-                                             cur_mm_hash_values,
-                                             ranges=range(num_matched, cur_matched_end))
+                                             cur_mm_hash_values)
                 block = logical_blocks[block_id]
                 # multiple unfull nodes with same hash_key can be added to parent.children
                 child = Node(hash_key=hash_key,
