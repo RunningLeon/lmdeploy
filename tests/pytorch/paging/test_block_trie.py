@@ -303,40 +303,86 @@ class TestBlockTire:
         assert len(block_trie.leaves) == 3
         assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 5)
 
-    @pytest.mark.multimodals
+    @pytest.mark.evict
     def test_evict_multimodals(self, block_trie, block_size, num_gpu_blocks):
         block_mgr = block_trie.block_manager
         sess = SchedulerSession(0, block_size)
-        token_ids = ([1] * block_size + [2] * block_size + [3] * block_size)
-        token_ids += [4] * (block_size // 2)
-        multimodals = dict(image=[
-            MultiModalTensor(data=None, start=1, end=block_size // 4, meta=dict(hash_value='image_0')),
-            MultiModalTensor(data=None, start=block_size // 4 + 2, end=block_size //
-                             2, meta=dict(hash_value='image_1')),
-            MultiModalTensor(data=None, start=block_size // 2 + 2, end=block_size * 2, meta=dict(hash_value='image_2')),
-            MultiModalTensor(data=None,
-                             start=block_size // 2 + 2 * block_size,
-                             end=block_size // 2 + 3 * block_size,
-                             meta=dict(hash_value='image_3')),
-        ])
-        seq0 = sess.add_sequence(token_ids, multimodals=multimodals)
+        token_ids0 = [1] * (block_size // 2)  # text0
+        token_ids0 += [2] * block_size  # img0
+        token_ids0 += [3] * (block_size // 2)  # text1
+        token_ids0 += [4] * (block_size // 2)  # img1
+        token_ids0 += [5] * (block_size // 4)  # text2
+
+        img0 = MultiModalTensor(data=None,
+                                start=block_size // 2,
+                                end=block_size + (block_size // 2),
+                                meta=dict(hash_value='image_0'))
+        img1 = MultiModalTensor(data=None,
+                                start=block_size * 2,
+                                end=block_size * 2 + (block_size // 2),
+                                meta=dict(hash_value='image_1'))
+        img2 = MultiModalTensor(data=None,
+                                start=block_size // 2,
+                                end=block_size + (block_size // 2),
+                                meta=dict(hash_value='image_2'))
+
+        multimodals0 = dict(image=[img0, img1])
+        # three blocks with two image
+        seq0 = sess.add_sequence(token_ids0, multimodals=multimodals0)
         block_mgr.allocate(seq0)
         block_trie.allocate(seq0)
-        assert len(block_trie.leaves) == 3
-        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 4)
-        multimodals = dict(image=[
-            MultiModalTensor(data=None, start=1, end=block_size // 4, meta=dict(hash_value='image_0')),
-            MultiModalTensor(data=None, start=block_size // 4 + 2, end=block_size //
-                             2, meta=dict(hash_value='image_1')),
-            MultiModalTensor(data=None, start=block_size // 2 + 2, end=block_size * 2, meta=dict(hash_value='image_2'))
-        ])
-        token_ids = [1] * block_size + [2] * block_size + [5] * (block_size // 2)
-        seq1 = sess.add_sequence(token_ids, multimodals=multimodals)
-        block_trie.match(seq1)
+        assert len(block_trie.leaves) == 2
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
 
+        # add other seq1 with two image
+        token_ids1 = [1] * (block_size // 2)  # text0
+        token_ids1 += [2] * block_size  # img2
+        token_ids1 += [3] * (block_size // 2)  # text1
+        token_ids1 += [4] * (block_size // 2)  # img1
+        token_ids1 += [6] * (block_size // 4)  # text2
+
+        multimodals1 = dict(image=[img2, img1])
+        seq1 = sess.add_sequence(token_ids1, multimodals=multimodals1)
+        block_trie.match(seq1)
         block_mgr.allocate(seq1)
         block_trie.allocate(seq1)
-        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 5)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 6)
+        assert len(block_trie.leaves) == 4
+
+        # test1 add seq one same image0 as seq0
+        token_ids = [1] * (block_size // 2)  # text0
+        token_ids += [2] * block_size  # img0
+        token_ids += [7] * block_size  # text, different
+        multimodals = dict(image=[img0])
+        seq = sess.add_sequence(token_ids, multimodals=multimodals)
+        block_trie.match(seq)
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 8)
+        assert len(block_trie.leaves) == 6
+        block_mgr.free(seq)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 7)
+        block_trie.evict(3)
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 6)
+        assert len(block_trie.leaves) == 4
+        # free seq1
+        block_mgr.free(seq1)
+        print(seq1.logical_blocks.get_real_blocks())
+        assert len(block_trie.leaves) == 4
+        # TODO need to evict twice, how to optimize?
+        block_trie.evict(3)
+        assert len(block_trie.leaves) == 4
+        block_trie.evict(3)
+        assert len(block_trie.leaves) == 2
+        assert block_mgr.get_num_free_gpu_blocks() == (block_mgr.num_gpu_blocks - 3)
+
+        # free all seqs
+        block_mgr.free(seq0)
+        # TODO need to evict twice, how to optimize?
+        block_trie.evict(num_gpu_blocks)
+        block_trie.evict(num_gpu_blocks)
+        assert len(block_trie.leaves) == 0
+        assert block_mgr.get_num_free_gpu_blocks() == block_mgr.num_gpu_blocks
 
     def test_evict(self, block_trie, block_size, num_gpu_blocks):
         block_mgr = block_trie.block_manager

@@ -1,7 +1,7 @@
 # yapf: disable
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 from lmdeploy.pytorch.messages import SchedulerSession
 from lmdeploy.pytorch.paging.block_manager import DefaultBlockManager, WindowBlockManager
@@ -59,7 +59,7 @@ class TestAllocator:
         # let ref=2 of block0, block1
         allocator.add_ref_count(blocks[:2], 1)
         ref_cnt1 = allocator.get_ref_count(blocks)
-        assert np.array_equal(ref_cnt1, [2, 2] + [1]*(block_size-2))
+        assert np.array_equal(ref_cnt1, [2, 2] + [1] * (block_size - 2))
         free_blocks = np.concatenate([blocks, blocks[:2]])
         allocator.free(free_blocks)
         assert allocator.get_num_free_blocks() == num_blocks
