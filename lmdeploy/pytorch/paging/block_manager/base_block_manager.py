@@ -178,6 +178,7 @@ class LogicalAllocator:
         """update access time."""
         now = time.perf_counter()
         self._log_mem.access_time[blocks] = now
+        return self._log_mem.access_time[blocks]
 
     def cpu_mem_offset(self):
         """get cpu mem offset in unified physical memory."""

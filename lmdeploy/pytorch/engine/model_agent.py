@@ -245,7 +245,6 @@ class AutoModelAgent:
         async def __forward(inputs):
             """forward."""
             nonlocal swap_done, swap_in_map, swap_out_map, copy_map
-            breakpoint()
             if swap_done:
                 return await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict(), copy_map=dict())
             else:

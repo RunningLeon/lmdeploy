@@ -1,7 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import heapq
+import enum
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, List, Literal
+from collections import defaultdict
 
 import numpy as np
 
@@ -22,6 +24,12 @@ def hash_block_tokens(tokens: np.ndarray, mm_hashes=None):
     hash_key = hash(hash_data)
     return hash_key
 
+class NodeType(enum.Enum):
+    """Status of a sequence."""
+
+    FULL = enum.auto()
+    UNFULL = enum.auto()
+    COPY = enum.auto()
 
 @dataclass
 class Node:
@@ -31,23 +39,25 @@ class Node:
     tokens: np.ndarray
     num_matched: int = 0
     mm_hashes: Optional[Tuple[str]] = None
-
+    node_type: NodeType = NodeType.FULL
+    
     def __post_init__(self):
         """post init."""
         self.children: Dict[int, 'Node'] = dict()
         self._parent: 'Node' = None
-
+        
     @property
     def parent(self):
         return self._parent
 
     @parent.setter
     def parent(self, val: 'Node'):
-        old_parent = self._parent
-        if old_parent is not None:
-            old_parent.children.pop(self.hash_key)
-        if val is not None:
-            val.children[self.hash_key] = self
+        if self.node_type != NodeType.COPY:
+            old_parent = self._parent
+            if old_parent is not None:
+                old_parent.children.pop(self.hash_key)
+            if val is not None:
+                val.children[self.hash_key] = self
         self._parent = val
 
     def match_child(self, tokens: np.ndarray, mm_hashes=None):
@@ -66,23 +76,33 @@ class Node:
                              f'mm_hashes={mm_hashes} with node={child}')
         return matched_child, hash_collision, hash_key
 
+    def clone(self):
+        """clone node"""
+        node = Node(self.hash_key, 
+                    block=self.block, 
+                    tokens=self.tokens, 
+                    mm_hashes=self.mm_hashes, 
+                    node_type=self.node_type,
+                    num_matched=self.num_matched)
+        return node
+    
     def __hash__(self):
         return hash((self.block, self.num_matched, self.hash_key))
 
     def __lt__(self, other):
-        return True
+        return self.num_matched < other.num_matched
 
     def __le__(self, other):
-        return True
+        return self.num_matched <= other.num_matched
 
     def __repr__(self):
         return (f'Node(hash_key={self.hash_key}, block={self.block}, '
+                f'node_type={self.node_type}, '
                 f'num_matched={self.num_matched}, mm_hashes={self.mm_hashes}, '
-                f'num_children={len(self.children)}, parent={self.parent}, '
+                f'num_children={len(self.children)}, parent_root={self._parent is None}, '
                 f'tokens={self.tokens}, num_children={len(self.children)})')
 
     __str__ = __repr__
-
 
 class BlockTrie:
     """block trie for prefix caching."""
@@ -98,6 +118,7 @@ class BlockTrie:
         self._roots: Dict[str, Node] = dict()
         self.leaves: Set[Node] = set()
         self.hit_rates = []
+        self.has_multimodals = False
 
     def get_root(self, adapter_name: str):
         """get root by adapter name."""
@@ -107,6 +128,185 @@ class BlockTrie:
 
     @logging_timer('BlockTrie_Match', logger)
     def match(self, seq: SchedulerSequence):
+        """match sequence and cache."""
+        if not self.enable:
+            return
+
+        block_size = self.block_size
+        matched_blocks = []
+
+        logical_blocks = seq.logical_blocks
+        curr: Node = getattr(logical_blocks, 'last_shared_node', None)
+        if curr is None:
+            curr = self.get_root(seq.adapter_name)
+        num_matched = curr.num_matched
+        init_num_matched = num_matched
+
+        def __match_success(node: Node):
+            nonlocal curr, num_matched
+            matched_blocks.append(node.block)
+            curr = node
+            num_matched += block_size
+
+        while num_matched + block_size <= seq.num_all_ids:
+            curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
+            child, _, _ = curr.match_child(curr_tokens, mm_hashes=None)
+            if child is None:
+                break
+            __match_success(child)
+
+        if len(matched_blocks) > 0:
+            matched_blocks = np.array(matched_blocks)
+            self.allocator.update_access_time(matched_blocks)
+            self.allocator.add_ref_count(matched_blocks, 1)
+            seq.logical_blocks.append(matched_blocks)
+            seq.set_step(num_matched)
+        hit_rate = 100 * len(matched_blocks) * block_size / float(seq.num_all_ids - init_num_matched)
+        self.hit_rates.append(hit_rate)
+        seq.logical_blocks.last_shared_node = curr
+        logger.info(f'Block Trie current hit rate={hit_rate}%, '
+                    f'mean hit rate={np.mean(self.hit_rates)}%, matching seq={seq}')
+
+    @logging_timer('BlockTrie_Allocate', logger)
+    def allocate(self, seq: SchedulerSequence):
+        """allocate."""
+        if not self.enable:
+            return
+
+        block_size = self.block_size
+        logical_blocks = seq.logical_blocks
+        node: Node = getattr(logical_blocks, 'last_shared_node', None)
+        if node is None:
+            node = self.get_root(seq.adapter_name)
+            logical_blocks.last_shared_node = node
+
+        num_matched = node.num_matched
+        num_all_ids = seq.num_all_ids
+
+        if num_matched + block_size > num_all_ids:
+            return
+
+        if len(node.children) == 0 and node.parent is not None:
+            self.leaves.remove(node)
+
+        blocks = []
+        free_blocks = []
+
+        block_id = num_matched // block_size
+        while num_matched + block_size <= num_all_ids:
+            curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
+
+            block = logical_blocks[block_id]
+            parent = node
+
+            mm_hashes = None
+            matched_child, hash_collision, hash_key = node.match_child(curr_tokens, mm_hashes=mm_hashes)
+            if hash_collision:
+                break
+
+            if matched_child is not None:
+                node = matched_child
+                free_blocks.append(block)
+                logical_blocks[block_id] = node.block
+            else:
+                node = Node(hash_key=hash_key,
+                            block=block,
+                            tokens=curr_tokens,
+                            num_matched=num_matched + block_size)
+                node.parent = parent
+            blocks.append(node.block)
+            num_matched += block_size
+            block_id += 1
+
+        logical_blocks.last_shared_node = node
+        if node.parent is not None and len(node.children) == 0:
+            # ignore root
+            self.leaves.add(node)
+        if len(blocks) > 0:
+            self.allocator.add_ref_count(np.array(blocks), 1)
+        if len(free_blocks) > 0:
+            self.allocator.free(np.array(free_blocks))
+
+    def evict(self, max_num_blocks: int):
+        """evict."""
+        if not self.enable or len(self.leaves) == 0:
+            return 0
+
+        def __remove_leaf(leaves, evicted_blocks):
+            _, leaf = heapq.heappop(leaves)
+            evicted_blocks.append(leaf.block)
+            parent = leaf.parent
+            leaf.parent = None
+            self.leaves.remove(leaf)
+            return parent
+
+        def __add_leaf(leaves, parent):
+            self.leaves.add(parent)
+            if self.allocator.get_ref_count(parent.block) == 1:
+                access_time = self.allocator.get_access_time(parent.block)
+                heapq.heappush(leaves, (access_time, parent))
+
+        evicted_blocks = []
+        leaves = list(self.leaves)
+
+        # filter ref-cnt == 1 (trie own one block ref)
+        leave_blocks = np.array(list(leaf.block for leaf in leaves))
+        ref_cnt = self.allocator.get_ref_count(leave_blocks)
+        indices = (ref_cnt == 1).nonzero()[0]
+        if len(indices) == 0:
+            return 0
+
+        # make heap
+        leaves = list(leaves[i] for i in indices)
+        access_times = self.allocator.get_access_time(leave_blocks)
+        access_times = list(access_times[i] for i in indices)
+        leaves = list(zip(access_times, leaves))
+        heapq.heapify(leaves)
+
+        while len(leaves) > 0 and len(evicted_blocks) < max_num_blocks:
+            parent = __remove_leaf(leaves, evicted_blocks)
+            if parent.parent is None:
+                # ignore root
+                continue
+            if len(parent.children) == 0:
+                __add_leaf(leaves, parent)
+
+        self.allocator.free(np.array(evicted_blocks))
+
+        return len(evicted_blocks)
+
+    def update_copy_map(self, seqs: List[SchedulerSequence], copy_map: Dict[int, int]):
+        """do nothing"""
+        return copy_map
+
+RangeType = Tuple[int, int, str]
+
+
+def get_mm_hash_values(mm_ranges: List[RangeType], start: int, end: int):
+    """get multimodals hash values that from [start, end)"""
+    mm_hash_values = []
+    multimodal_ends = []
+
+    for mm_start, mm_end, hash_value in mm_ranges:
+        # the mm range intersect with the target range
+        if mm_start < end and mm_end > start:
+            mm_hash_values.append(hash_value)
+            # the mm end in the target range
+            if start < mm_end <= end:
+                cur_data = (tuple(mm_hash_values), mm_end)
+                multimodal_ends.append(cur_data)
+
+    if len(mm_hash_values) == 0:
+        mm_hash_values = None
+    else:
+        mm_hash_values = tuple(mm_hash_values)
+    return mm_hash_values, multimodal_ends
+
+
+class BlockTrieVLM(BlockTrie):
+    
+    @logging_timer('BlockTrie_Match', logger)
+    def match_whole(self, seq: SchedulerSequence):
         """match sequence and cache."""
         if not self.enable:
             return
@@ -208,7 +408,7 @@ class BlockTrie:
                     f'mean hit rate={np.mean(self.hit_rates)}%, matching seq={seq}')
 
     @logging_timer('BlockTrie_Allocate', logger)
-    def allocate(self, seq: SchedulerSequence):
+    def allocate_whole(self, seq: SchedulerSequence):
         """allocate."""
         if not self.enable:
             return
@@ -369,7 +569,7 @@ class BlockTrie:
             self.allocator.free(np.array(free_blocks))
 
     @logging_timer('BlockTrie_Evict', logger)
-    def evict(self, max_num_blocks: int):
+    def evict_whole(self, max_num_blocks: int):
         """evict."""
         if not self.enable:
             return 0
@@ -431,3 +631,434 @@ class BlockTrie:
         self.allocator.free(np.array(evicted_blocks))
 
         return len(evicted_blocks)
+
+    @logging_timer('BlockTrie_Match', logger)
+    def match(self, seq: SchedulerSequence):
+        """match sequence and cache."""
+        if not self.enable:
+            return
+
+        block_size = self.block_size
+        matched_blocks = []
+
+        logical_blocks = seq.logical_blocks
+        curr: Node = getattr(logical_blocks, 'last_shared_node', None)
+        if curr is None:
+            curr = self.get_root(seq.adapter_name)
+
+        last_node = curr
+        if curr.node_type != NodeType.FULL:
+            assert curr.parent is not None
+            # only match prefilled tokens
+            # return
+            curr = curr.parent
+        
+        num_matched = curr.num_matched
+        num_all_ids = seq.num_all_ids
+        matched_step = num_matched
+        update_time_blocks = []
+        
+        def __match_success(node: Node):
+            nonlocal curr, num_matched
+            
+            if node.node_type == NodeType.UNFULL:
+                new_node = node.clone()
+                new_node.node_type = NodeType.COPY
+                new_node.parent = node._parent
+                curr = new_node
+                update_time_blocks.append(node.block)
+            elif node.node_type == NodeType.COPY:
+                raise 
+            else:
+                matched_blocks.append(node.block)
+                curr = node
+            num_matched += block_size
+
+        def __match_pure_text():
+            nonlocal curr, num_matched
+            while num_matched + block_size <= seq.num_all_ids:
+                curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
+                child, _, _ = curr.match_child(curr_tokens, mm_hashes=None)
+                if child is None:
+                    break
+                __match_success(child)
+
+        def __match_multimodals():
+            nonlocal curr, last_node, num_matched, matched_step, mm_ranges, matched_blocks
+            
+            while num_matched < num_all_ids:
+                mm_hash_values, mm_multi_ends = get_mm_hash_values(mm_ranges, num_matched, num_matched + block_size)
+                if not mm_hash_values:
+                    if num_matched + block_size > num_all_ids:
+                        # ignore last unfull text block
+                        break
+                    # pure text
+                    tokens = seq.history_cache[num_matched:num_matched + block_size]
+                    matched_node, _, _ = curr.match_child(tokens)
+                else:
+                    # if full vision tokens without last vision token in the range
+                    # or the last token is vision token and is the end of the vision range
+                    if len(mm_multi_ends) == 0 or mm_multi_ends[-1][1] != (num_matched + block_size):
+                        mm_multi_ends.append((mm_hash_values, num_matched + block_size))
+                    mm_multi_ends = [
+                        key_end for key_end in mm_multi_ends if last_node.num_matched < key_end[1] <= num_all_ids
+                    ]
+                    mm_multi_ends.reverse()
+                    matched_node = None
+
+                    for cur_mm_hash_values, cur_matched_end in mm_multi_ends:
+                        tokens = seq.history_cache[num_matched:cur_matched_end]
+                        matched_node, _, _ = curr.match_child(tokens, cur_mm_hash_values)
+                        if matched_node is not None:
+                            break
+
+                if matched_node is None:
+                    break
+                # matched success
+                matched_step = matched_node.num_matched
+                __match_success(matched_node)
+                last_node = curr
+                if matched_node.node_type != NodeType.FULL:
+                    break
+                mm_ranges = [data for data in mm_ranges if data[1] > num_matched]
+
+        mm_ranges = None
+        if seq.history_multimodals is not None and len(seq.history_multimodals.mm_ranges) > 0:
+            mm_ranges = list(seq.history_multimodals.mm_ranges)
+            mm_ranges = [data for data in mm_ranges if data[1] > curr.num_matched]
+            if len(mm_ranges) == 0:
+                mm_ranges = None
+                
+        if mm_ranges is None:
+            __match_pure_text()
+        else:
+            __match_multimodals()
+
+        update_time_blocks = update_time_blocks + matched_blocks
+        if len(update_time_blocks) > 0:
+            self.allocator.update_access_time(np.array(update_time_blocks))
+            
+        if len(matched_blocks) > 0:
+            matched_blocks = np.array(matched_blocks)
+            self.allocator.add_ref_count(matched_blocks, 1)
+            seq.logical_blocks.append(matched_blocks)
+            seq.set_step(matched_step)
+
+        hit_rate = 100 * matched_step / seq.num_all_ids
+        self.hit_rates.append(hit_rate)
+        seq.logical_blocks.last_shared_node = last_node
+        logger.info(f'Block Trie current hit rate={hit_rate}%, '
+                    f'mean hit rate={np.mean(self.hit_rates)}%, matching seq={seq}')
+
+    @logging_timer('BlockTrie_Allocate', logger)
+    def allocate(self, seq: SchedulerSequence):
+        """allocate."""
+        if not self.enable:
+            return
+
+        block_size = self.block_size
+        logical_blocks = seq.logical_blocks
+        node: Node = getattr(logical_blocks, 'last_shared_node', None)
+        if node is None:
+            node = self.get_root(seq.adapter_name)
+            logical_blocks.last_shared_node = node
+
+        last_node = node
+        if node.node_type != NodeType.FULL:
+            assert node.parent is not None
+            # only cache prefilled tokens
+            # return
+            node = node.parent
+
+        num_matched = node.num_matched
+        num_all_ids = seq.num_all_ids
+
+        self.leaves.discard(node)
+
+        blocks = []
+        free_blocks = []
+        unfull_leaves = []
+        
+        def __allocate_text():
+            nonlocal node, num_matched, blocks, free_blocks
+
+            block_id = num_matched // block_size
+            while num_matched + block_size <= num_all_ids:
+                curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
+
+                block = logical_blocks[block_id]
+                parent = node
+
+                mm_hashes = None
+                matched_child, hash_collision, hash_key = node.match_child(curr_tokens, mm_hashes=mm_hashes)
+                if hash_collision:
+                    break
+
+                if matched_child is not None:
+                    node = matched_child
+                    free_blocks.append(block)
+                    logical_blocks[block_id] = node.block
+                else:
+                    node = Node(hash_key=hash_key,
+                                block=block,
+                                tokens=curr_tokens,
+                                num_matched=num_matched + block_size)
+                    node.parent = parent
+                blocks.append(node.block)
+                num_matched += block_size
+                block_id += 1
+
+        def __add_unfull_nodes(block_id, parent: Node, multi_segments: List[Tuple[Tuple[str], int]]):
+            # add multiple nodes of un-full blocks
+            nonlocal free_blocks, blocks
+
+            unfull_nodes = []
+            for cur_mm_hash_values, cur_matched_end in multi_segments:
+                assert cur_mm_hash_values, 'only support multimodal unfull'
+                curr_tokens = seq.history_cache[num_matched:cur_matched_end]
+                is_full = len(curr_tokens) == block_size
+                assert not is_full
+                matched_child, hash_collision, hash_key = parent.match_child(curr_tokens, mm_hashes=cur_mm_hash_values)
+                if hash_collision:
+                    continue
+                
+                block = logical_blocks[block_id]
+                if matched_child is None:
+                    # multiple unfull nodes with same hash_key can be added to parent.children
+                    child = Node(hash_key=hash_key,
+                                block=block,
+                                tokens=curr_tokens,
+                                num_matched=cur_matched_end,
+                                mm_hashes=cur_mm_hash_values,
+                                node_type=NodeType.UNFULL
+                                )
+                    child.parent = parent
+                    blocks.append(block)
+                    logger.info(f'allocate num_matched={num_matched} add refed [unfull] node={child}')
+                    unfull_nodes.append(child)
+                    
+            return unfull_nodes
+
+        def __add_full_node(block_id, node, mm_hash_values=None):
+            # add a node of a full-filled block
+            nonlocal free_blocks, blocks
+
+            curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
+            is_full = len(curr_tokens) == block_size
+            assert is_full
+            assert node.node_type == NodeType.FULL
+            block = logical_blocks[block_id]
+            parent = node
+            matched_child, hash_collision, hash_key = node.match_child(curr_tokens, mm_hashes=mm_hash_values)
+            if hash_collision:
+                return node, False
+
+            if matched_child is not None:
+                node = matched_child
+                free_blocks.append(block)
+                logical_blocks[block_id] = node.block
+                logger.info(f'Reuse full node {node}')
+            else:
+                node = Node(hash_key=hash_key,
+                            block=block,
+                            tokens=curr_tokens,
+                            num_matched=num_matched + block_size,
+                            mm_hashes=mm_hash_values
+                            )
+                node.parent = parent
+                logger.info(f'Add new full node {node}')
+            blocks.append(node.block)
+            return node, True
+
+        def __allocate_multimodals():
+            nonlocal node, last_node, num_matched, blocks, free_blocks, mm_ranges, unfull_leaves
+
+            block_id = num_matched // block_size
+
+            while num_matched < num_all_ids:
+                mm_hash_values, mm_multi_ends = get_mm_hash_values(mm_ranges, num_matched, num_matched + block_size)
+                full_mm_hash_values = None
+                if mm_hash_values:
+                    if len(mm_multi_ends) == 0:
+                        # it's a full block with all tokens are vision tokens and no vision end token in this block
+                        full_mm_hash_values = mm_hash_values
+                    else:
+                        if mm_multi_ends[-1][1] == (num_matched + block_size):
+                            # the last token is vision token and is vision end token
+                            full_mm_hash_values, _ = mm_multi_ends.pop(-1)
+                        elif num_matched + block_size <= num_all_ids:
+                            full_mm_hash_values = mm_hash_values
+                    mm_multi_ends = [
+                        key_end for key_end in mm_multi_ends if last_node.num_matched < key_end[1] <= num_all_ids
+                    ]
+                    if len(mm_multi_ends) > 0:
+                        cur_unfull_nodes = __add_unfull_nodes(block_id, node, mm_multi_ends)
+                        if len(cur_unfull_nodes) > 0:
+                            last_node = cur_unfull_nodes[-1]
+                            unfull_leaves += cur_unfull_nodes
+
+                if num_matched + block_size <= num_all_ids:
+                    node, success = __add_full_node(block_id, node, full_mm_hash_values)
+                    
+                    if success:
+                        if last_node.node_type == NodeType.COPY:
+                            last_node._parent = None
+                        last_node = node
+                    else:
+                        break
+
+                num_matched += block_size
+                block_id += 1
+                mm_ranges = [data for data in mm_ranges if data[1] > num_matched]
+                
+        mm_ranges = None
+        if seq.history_multimodals is not None and len(seq.history_multimodals.mm_ranges) > 0:
+            mm_ranges = list(seq.history_multimodals.mm_ranges)
+            mm_ranges = [data for data in mm_ranges if data[1] > node.num_matched]
+            if len(mm_ranges) == 0:
+                mm_ranges = None
+
+        if mm_ranges is None:
+            __allocate_text()
+        else:
+            __allocate_multimodals()
+
+        logical_blocks.last_shared_node = last_node
+        for curr_node in unfull_leaves + [last_node]:
+            if curr_node.parent is not None and len(curr_node.children) == 0 and curr_node.node_type != NodeType.COPY:
+                # ignore root
+                self.leaves.add(curr_node)
+        if len(blocks) > 0:
+            self.allocator.add_ref_count(np.array(blocks), 1)
+        if len(free_blocks) > 0:
+            self.allocator.free(np.array(free_blocks))
+
+    @logging_timer('BlockTrie_Evict', logger)
+    def evict(self, max_num_blocks: int):
+        """evict."""
+        if not self.enable or len(self.leaves) == 0:
+            return 0
+
+        def __get_candidate_leaves(leaves):
+            """Get candidate leaves to evict.
+            """
+            blocks = list(leaf.block for leaf in leaves)
+            ref_cnt = self.allocator.get_ref_count(np.array(blocks))
+            indices = (ref_cnt == 1).nonzero()[0]
+            candidates = [leaves[i] for i in indices]
+            # deal with multiple ref due to unfull node
+            indices = (ref_cnt > 1).nonzero()[0]
+            unfull_blocks = set([blocks[idx] for idx in indices if leaves[idx].node_type == NodeType.UNFULL])
+            groups = defaultdict(list)
+            for idx in indices:
+                blk = blocks[idx]
+                if blk in unfull_blocks:
+                    groups[blk].append(idx)
+            candi_blocks = [b for b, gp in groups.items() if len(gp) == ref_cnt[gp[0]]]
+            
+            if len(candi_blocks) > 0:
+                deduce_blocks = []
+                for block in candi_blocks:
+                    group = groups[block]
+                    group = [leaves[idx] for idx in group]
+                    group.sort(key=lambda x: x.num_matched)
+                    candidates.append(group[0])
+                    for leaf in group[1:]:
+                        deduce_blocks.append(block)
+                        logger.info(f'Remove leaf and deduce ref {leaf}')
+                        self.leaves.remove(leaf)
+                        leaf.parent = None
+
+                if len(deduce_blocks) > 0:
+                    logger.info(f'Candidate deduce ref blocks={deduce_blocks}')
+                    self.allocator.add_ref_count(np.array(deduce_blocks), -1)
+            return candidates
+
+        def __remove_leaf(leaves, evicted_blocks):
+            _, leaf = heapq.heappop(leaves)
+            evicted_blocks.append(leaf.block)
+            parent = leaf.parent
+            leaf.parent = None
+            self.leaves.remove(leaf)
+            logger.info(f'Evict {leaf}')
+            return parent, leaf
+
+        def __add_leaf(leaves, parent):
+            ref = self.allocator.get_ref_count(parent.block)
+            # when add new leaf, check co-reffed unfull leaves
+            unfull_leaves = [leaf for leaf in self.leaves if leaf.node_type == NodeType.UNFULL and leaf.block == parent.block]
+            if (len(unfull_leaves) + 1 ) == ref:
+                unfull_leaves.sort(key=lambda x: x.num_matched)
+                keep_node = unfull_leaves[0]
+                leaves_to_remove = unfull_leaves[1:] + [parent]
+                deduce_blocks = [parent.block] * len(leaves_to_remove)
+                for leaf in leaves_to_remove:
+                    leaf.parent = None
+                    self.leaves.discard(leaf)
+                self.allocator.add_ref_count(np.array(deduce_blocks), -1)
+                parent = keep_node
+                ref = 1
+            if ref == 1:
+                access_time = self.allocator.get_access_time(parent.block)
+                heapq.heappush(leaves, (access_time, parent))
+
+        evicted_blocks = []
+        leaves = list(self.leaves)
+
+        # filter ref-cnt == 1 (trie own one block ref)
+        leaves = __get_candidate_leaves(leaves)
+        if len(leaves) == 0:
+            return 0
+
+        # make heap
+        leave_blocks = np.array([leaf.block for leaf in leaves])
+        access_times = self.allocator.get_access_time(leave_blocks)
+        leaves = list(zip(access_times, leaves))
+        heapq.heapify(leaves)
+
+        while len(leaves) > 0 and len(evicted_blocks) < max_num_blocks:
+            parent, removed_leaf = __remove_leaf(leaves, evicted_blocks)
+            if parent.parent is None:
+                # ignore root
+                continue
+
+            # remove nodes of with same mm_hashes
+            if removed_leaf.mm_hashes:
+                while removed_leaf.mm_hashes == parent.mm_hashes and len(parent.children) == 0:
+                    tmp_parent = parent.parent
+                    evicted_blocks.append(parent.block)
+                    parent.parent = None
+                    logger.info(f'Evict multimodal node={parent}')
+                    parent = tmp_parent
+                    logger.info(f'Next multimodal node={parent}')
+
+                if parent.parent is None:
+                    # ignore root
+                    continue
+
+            if len(parent.children) == 0:
+                __add_leaf(leaves, parent)
+
+        self.allocator.free(np.array(evicted_blocks))
+
+        return len(evicted_blocks)
+
+    def update_copy_map(self, seqs: List[SchedulerSequence], copy_map: Dict[int, int]):
+        """update node block and copy map"""
+        if self.enable:
+            for seq in seqs:
+                node = getattr(seq.logical_blocks, 'last_shared_node', None)
+                if node is not None and node.node_type == NodeType.COPY:
+                    block_id = node.num_matched // self.block_size
+                    copy_map[node.block] = seq.logical_blocks[block_id]
+                    node.block = seq.logical_blocks[block_id]
+        return copy_map
+
+def build_blocktrie(cache_config: CacheConfig, block_manager: BaseBlockManager, task_type: Literal['llm', 'vlm']='llm'):
+    """build block trie"""
+    if task_type == 'llm':
+        return BlockTrie(cache_config, block_manager)
+    else:
+        return BlockTrieVLM(cache_config, block_manager)
+
+    
