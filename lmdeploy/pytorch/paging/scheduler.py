@@ -3,14 +3,14 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 from lmdeploy.utils import get_logger, logging_timer
 
 from ..config import CacheConfig, SchedulerConfig
 from ..messages import MessageStatus, SchedulerSequence, SchedulerSession, SequenceManager
 from .block_manager import build_block_manager
-from .block_trie import BlockTrie
+from .block_trie import build_blocktrie
 
 logger = get_logger('lmdeploy')
 
@@ -35,14 +35,14 @@ class Scheduler:
         cache_config (CacheConfig): The config of cache info.
     """
 
-    def __init__(self, scheduler_config: SchedulerConfig, cache_config: CacheConfig) -> None:
+    def __init__(self, scheduler_config: SchedulerConfig, cache_config: CacheConfig, task_type: Literal['llm', 'vlm']='llm') -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
-
+        self.task_type = task_type
         self.sessions: Dict[int, SchedulerSession] = OrderedDict()
 
         self.block_manager = build_block_manager(cache_config)
-        self.block_trie = BlockTrie(self.cache_config, self.block_manager)
+        self.block_trie = build_blocktrie(self.cache_config, self.block_manager, task_type=task_type)
 
         self.eviction_helper = self.build_eviction_helper(self.scheduler_config.eviction_type)
 
@@ -144,7 +144,7 @@ class Scheduler:
         def _reorder_waiting():
             """reorder waiting."""
             return sorted(self.waiting, key=lambda seq: seq.arrive_time)
-
+            
         num_waiting = self.seq_manager.num_sequences(MessageStatus.WAITING)
         if (len(running) >= max_batches or num_waiting == 0):
             return running, swap_in_map, swap_out_map, copy_map
@@ -164,7 +164,9 @@ class Scheduler:
             # allocate session memory
             self.block_manager.allocate(seq)
             _to_running(seq)
-
+            
+        copy_map = self.block_trie.update_copy_map(running, copy_map)
+        
         return running, swap_in_map, swap_out_map, copy_map
 
     @logging_timer('ScheduleDecoding', logger)

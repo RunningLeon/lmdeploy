@@ -11,6 +11,7 @@ import torch
 
 from lmdeploy.messages import PytorchEngineConfig, ResponseType
 from lmdeploy.utils import get_logger, get_max_batch_size, get_model, logging_timer
+from lmdeploy.archs import check_vl_llm
 
 from ..adapter.adapter import AdapterManager
 from ..config import BackendConfig, CacheConfig, DistConfig, ModelConfig, SchedulerConfig
@@ -342,7 +343,9 @@ class Engine:
         self.input_processor = self.executor.get_input_processor()
         cache_config = self.executor.cache_config
         self.adapter_manager = self._build_adapter_manager(adapters)
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        is_vlm = check_vl_llm(self.model_config.hf_config.to_dict())
+        task_type = 'vlm' if is_vlm else 'llm'
+        self.scheduler = Scheduler(scheduler_config, cache_config, task_type=task_type)
 
         # engine args
         self.model_path = model_path
@@ -798,6 +801,7 @@ class Engine:
                 inputs=ModelInputs.make_dummy(1, is_decoding=not prefill),
                 swap_in_map=dict(),
                 swap_out_map=dict(),
+                copy_map=dict(),
                 loop_count=num_loops,
                 is_dummy=True,
                 sync_long_context=False,
@@ -826,6 +830,7 @@ class Engine:
         running = scheduler_output.running
         swap_in_map = scheduler_output.swap_in_map
         swap_out_map = scheduler_output.swap_out_map
+        copy_map = scheduler_output.copy_map
 
         if self.should_execute_dummy_batch and len(running) == 0:
             return __make_dummy_inputs()
@@ -847,6 +852,7 @@ class Engine:
             inputs=inputs,
             swap_in_map=swap_in_map,
             swap_out_map=swap_out_map,
+            copy_map=copy_map,
             loop_count=num_loops,
             all_ids=all_ids,
             guided_input_ids=guided_input_ids,

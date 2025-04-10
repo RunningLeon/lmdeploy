@@ -69,10 +69,6 @@ def pipeline(model_path: str,
         model_path = get_model(model_path, download_dir, revision)
 
     task, pipeline_class = get_task(model_path)
-    if task == 'vlm':
-        if backend_config and backend_config.enable_prefix_caching:
-            backend_config.enable_prefix_caching = False
-            logger.warning('VLM does not support prefix caching.')
 
     if type(backend_config) is not PytorchEngineConfig:
         # set auto backend mode
