@@ -6,9 +6,8 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 import PIL
 
 from lmdeploy.messages import PytorchEngineConfig, TurbomindEngineConfig, VisionConfig
-from lmdeploy.pytorch.check_env import try_import_deeplink
 from lmdeploy.serve.async_engine import AsyncEngine
-from lmdeploy.utils import get_logger
+from lmdeploy.utils import get_logger, try_import_deeplink
 from lmdeploy.vl.engine import ImageEncoder
 from lmdeploy.vl.utils import load_image
 
@@ -28,7 +27,13 @@ class VLAsyncEngine(AsyncEngine):
                  **kwargs) -> None:
         if backend == 'pytorch':
             try_import_deeplink(backend_config.device_type)
+        if backend_config.enable_prefix_caching and backend == 'turbomind':
+            backend_config.enable_prefix_caching = False
+            logger.warning('VLM does not support prefix caching for turbomind engine.')
         self.vl_encoder = ImageEncoder(model_path, backend, vision_config, backend_config=backend_config)
+        if backend_config.enable_prefix_caching and not self.vl_encoder.model.support_prefix_caching:
+            logger.warning(f'Prefix caching is not supported for {model_path}')
+
         super().__init__(model_path, backend=backend, backend_config=backend_config, **kwargs)
         if self.model_name == 'base':
             raise RuntimeError(

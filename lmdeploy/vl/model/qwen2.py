@@ -25,11 +25,15 @@ class Qwen2VLModel(VisonModel):
     """Qwen2VL model."""
 
     _arch = ['Qwen2VLForConditionalGeneration', 'Qwen2_5_VLForConditionalGeneration']
+    support_prefix_caching: bool = False
 
     def build_preprocessor(self):
         check_qwen_vl_deps_install()
         from transformers import AutoProcessor
         self.processor = AutoProcessor.from_pretrained(self.model_path)
+        tokenizer = self.processor.tokenizer
+        image_token = self.processor.image_token
+        self.image_token_id = tokenizer.encode(image_token)[-1]
 
     def preprocess(self, messages: List[Dict]) -> List[Dict]:
         """refer to `super().preprocess()` for spec."""
@@ -40,7 +44,6 @@ class Qwen2VLModel(VisonModel):
         outputs = []
         for image, params in images:
             image = image.convert('RGB')
-
             item = dict(type='image', image=image)
             item.update({key: params[key] for key in params.keys() if key in optional_keys})
             image_inputs, _ = process_vision_info([dict(content=[item])])

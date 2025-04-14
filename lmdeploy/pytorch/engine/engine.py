@@ -87,7 +87,7 @@ def _build_dist_config(engine_config: PytorchEngineConfig):
     dist_config = DistConfig(
         dp=engine_config.dp,
         tp=engine_config.tp,
-        ep=1,
+        ep=engine_config.ep,
         dp_rank=engine_config.dp_rank,
     )
     return dist_config
@@ -292,10 +292,6 @@ class Engine:
         tp = engine_config.tp
         dp = engine_config.dp
         dp_rank = engine_config.dp_rank
-        if engine_config.ep > 1 and not engine_config.eager_mode:
-            logger.warning('Enable eager mode on ep > 1.')
-            # TODO: support eager with dp
-            engine_config.eager_mode = True
 
         self.tokenizer = tokenizer
         self.tp = tp
@@ -698,12 +694,13 @@ class Engine:
             if msg.status != MessageStatus.LOCKED:
                 continue
             update_token = token
+
+            # fill token
+            msg.update_token_ids(update_token, model_meta=model_meta)
+            msg.num_new_tokens += 1
             if stop:
                 update_token = _EMPTY_TOKEN
-            else:
-                msg.num_new_tokens += 1
-            msg.update_token_ids(update_token, model_meta=model_meta)
-            if stop:
+                msg.update_token_ids(update_token, model_meta=model_meta)
                 msg.status = MessageStatus.STOPPED
 
     def _make_infer_outputs(self, next_token_ids: torch.LongTensor, running: SeqList, logits: torch.Tensor,
@@ -798,6 +795,7 @@ class Engine:
                 inputs=ModelInputs.make_dummy(1, is_decoding=not prefill),
                 swap_in_map=dict(),
                 swap_out_map=dict(),
+                copy_map=dict(),
                 loop_count=num_loops,
                 is_dummy=True,
                 sync_long_context=False,
@@ -826,6 +824,7 @@ class Engine:
         running = scheduler_output.running
         swap_in_map = scheduler_output.swap_in_map
         swap_out_map = scheduler_output.swap_out_map
+        copy_map = scheduler_output.copy_map
 
         if self.should_execute_dummy_batch and len(running) == 0:
             return __make_dummy_inputs()
@@ -847,6 +846,7 @@ class Engine:
             inputs=inputs,
             swap_in_map=swap_in_map,
             swap_out_map=swap_out_map,
+            copy_map=copy_map,
             loop_count=num_loops,
             all_ids=all_ids,
             guided_input_ids=guided_input_ids,

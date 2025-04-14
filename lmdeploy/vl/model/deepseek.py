@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM
 from lmdeploy.utils import get_logger
 from lmdeploy.vl.model.base import VISION_MODELS, VisonModel
 from lmdeploy.vl.model.utils import disable_logging
+from lmdeploy.vl.utils import hash_multimodal_data
 
 logger = get_logger('lmdeploy')
 
@@ -31,7 +32,10 @@ class DeepSeekVisionModel(VisonModel):
     def build_preprocessor(self):
         check_deepseek_vl_install()
         from deepseek_vl.models import VLChatProcessor
-        self.image_processor = VLChatProcessor.from_pretrained(self.model_path).image_processor
+        vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
+        tokenizer = vl_chat_processor.tokenizer
+        self.image_token_id = tokenizer.vocab.get(vl_chat_processor.image_tag)
+        self.image_processor = vl_chat_processor.image_processor
 
     def build_model(self):
         """build the vision part of a VLM model when backend is turbomind, or
@@ -87,9 +91,12 @@ class DeepSeekVisionModel(VisonModel):
         """refers to the spec of `super.preprocess()"""
         images = self.collect_images(messages)
         outputs = []
-        for image, _ in images:
+        for image, params in images:
             image = image.convert('RGB')
             pixel_values = self.image_processor([image], return_tensors='pt').pixel_values
+            hash_value = None
+            if self.enable_prefix_caching:
+                hash_value = hash_multimodal_data(model_id=self.model_path, image=image, params=params)
             outputs.append(
                 dict(
                     pixel_values=pixel_values,
@@ -97,6 +104,7 @@ class DeepSeekVisionModel(VisonModel):
                     # refer to https://github.com/deepseek-ai/DeepSeek-VL/blob/main/deepseek_vl/models/processing_vlm.py  # noqa
                     # which is hardcoded 576
                     image_tokens=576,
+                    hash_value=hash_value,
                     image_token_id=self.image_token_id))
         messages.append(dict(role='preprocess', content=outputs))
         return messages
