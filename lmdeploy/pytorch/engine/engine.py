@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from lmdeploy.messages import PytorchEngineConfig, RequestMetrics, ResponseType
+from lmdeploy.messages import PytorchEngineConfig, RequestMetrics, ResponseType, SpeculativeConfig
 from lmdeploy.pytorch.disagg.config import EngineRole
 from lmdeploy.pytorch.disagg.conn.engine_conn import EngineP2PConnection
 from lmdeploy.pytorch.disagg.conn.protocol import (DistServeConnectionRequest, DistServeDropConnectionRequest,
@@ -21,7 +21,7 @@ from lmdeploy.utils import get_logger, get_max_batch_size, get_model, logging_ti
 from ..adapter.adapter import AdapterManager
 from ..config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig, SchedulerConfig
 from ..messages import MessageStatus, SchedulerSequence
-from ..model_inputs import ModelInputs, VisionModelInputs
+from ..model_inputs import ModelInputs, SpecMetaData, VisionModelInputs
 from ..paging import Scheduler
 from .base import EngineBase
 from .engine_checker import EngineChecker
@@ -225,6 +225,7 @@ class InputsMakerAsync(InputsMakerBase):
         super().__init__(engine)
         self.scheduler = self.engine.scheduler
         self.forward_inputs = None
+        self.spec_decoding = engine.speculative_config is not None
 
         self.dp = self.engine.dist_config.dp
         self.role = self.engine.cache_config.role
@@ -236,7 +237,7 @@ class InputsMakerAsync(InputsMakerBase):
             self.do_prefill = self.do_prefill_dp
 
     def do_prefill_dp(self):
-        if self.role == EngineRole.Prefill:
+        if self.role == EngineRole.Prefill or self.spec_decoding:
             return True
 
         scheduler = self.scheduler
@@ -248,6 +249,9 @@ class InputsMakerAsync(InputsMakerBase):
         return ret
 
     def do_prefill_default(self):
+        if self.spec_decoding:
+            return True
+
         # decoding if no waiting
         scheduler = self.scheduler
         if not scheduler.has_waiting():
@@ -321,11 +325,14 @@ class Engine(EngineBase):
         trust_remote_code (bool): Trust remote code.
     """
 
-    def __init__(self,
-                 model_path: str,
-                 tokenizer: object,
-                 engine_config: PytorchEngineConfig = None,
-                 trust_remote_code: bool = True) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        tokenizer: object,
+        engine_config: PytorchEngineConfig = None,
+        trust_remote_code: bool = True,
+        speculative_config: SpeculativeConfig = None,
+    ) -> None:
         # make sure engine config exist
         engine_config = _update_engine_config(engine_config)
 
@@ -350,6 +357,17 @@ class Engine(EngineBase):
                                 logger=logger)
         checker.handle()
 
+        # spec decode
+        num_spec_tokens = 0
+        self.speculative_config = speculative_config
+
+        if speculative_config is not None:
+            num_spec_tokens = speculative_config.num_speculative_tokens
+            engine_config.prefill_interval = 1
+            if speculative_config.model and not os.path.exists(speculative_config.model):
+                speculative_config.model = get_model(speculative_config.model, engine_config.download_dir,
+                                                     engine_config.revision)
+
         # build configs
         scheduler_config = _build_scheduler_config(engine_config)
         cache_config = _build_cache_config(engine_config)
@@ -361,22 +379,25 @@ class Engine(EngineBase):
         raw_tokenizer = None
         if tokenizer is not None:
             raw_tokenizer = tokenizer.model.model
-        self.executor = build_executor(model_path,
-                                       cache_config=cache_config,
-                                       backend_config=backend_config,
-                                       dist_config=dist_config,
-                                       misc_config=misc_config,
-                                       tokenizer=raw_tokenizer,
-                                       adapters=adapters,
-                                       device_type=engine_config.device_type,
-                                       distributed_executor_backend=engine_config.distributed_executor_backend,
-                                       dtype=engine_config.dtype)
+        self.executor = build_executor(
+            model_path,
+            cache_config=cache_config,
+            backend_config=backend_config,
+            dist_config=dist_config,
+            misc_config=misc_config,
+            tokenizer=raw_tokenizer,
+            adapters=adapters,
+            device_type=engine_config.device_type,
+            distributed_executor_backend=engine_config.distributed_executor_backend,
+            dtype=engine_config.dtype,
+            speculative_config=speculative_config,
+        )
         self.executor.init()
 
         self.input_processor = self.executor.get_input_processor()
         cache_config = self.executor.cache_config
         self.adapter_manager = self._build_adapter_manager(adapters)
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, num_spec_tokens=num_spec_tokens)
 
         # engine args
         self.model_path = model_path
@@ -409,6 +430,7 @@ class Engine(EngineBase):
                         tokenizer: object,
                         engine_config: PytorchEngineConfig = None,
                         trust_remote_code: bool = True,
+                        speculative_config: SpeculativeConfig = None,
                         **kwargs):
         """Lmdeploy python inference engine.
 
@@ -430,17 +452,23 @@ class Engine(EngineBase):
         if engine_config is not None and engine_config.enable_mp_engine:
             from .mp_engine import build_mp_engine
             backend = engine_config.mp_engine_backend
-            return build_mp_engine(backend=backend,
-                                   model_path=pretrained_model_name_or_path,
-                                   tokenizer=tokenizer,
-                                   engine_config=engine_config,
-                                   trust_remote_code=trust_remote_code)
+            return build_mp_engine(
+                backend=backend,
+                model_path=pretrained_model_name_or_path,
+                tokenizer=tokenizer,
+                engine_config=engine_config,
+                trust_remote_code=trust_remote_code,
+                speculative_config=speculative_config,
+            )
         if len(kwargs) > 0:
             logger.debug(f'Get unexpected kwargs: {kwargs}')
-        return cls(model_path=pretrained_model_name_or_path,
-                   tokenizer=tokenizer,
-                   engine_config=engine_config,
-                   trust_remote_code=trust_remote_code)
+        return cls(
+            model_path=pretrained_model_name_or_path,
+            tokenizer=tokenizer,
+            engine_config=engine_config,
+            trust_remote_code=trust_remote_code,
+            speculative_config=speculative_config,
+        )
 
     def _download_adapters(self, adapters: Dict[str, str], engine_config: PytorchEngineConfig):
         """Download adapters."""
@@ -718,6 +746,41 @@ class Engine(EngineBase):
         return vision_embedding_inputs
 
     @torch.inference_mode()
+    @logging_timer('create_spec_inputs', logger)
+    def _create_spec_inputs(self, messages: SeqList, token_ids: List[List[int]]):
+        """Create spec inputs from messages."""
+
+        spec_metadata: SpecMetaData = SpecMetaData()
+        spec_tokens = [msg.spec_token_ids for msg in messages]
+        num_spec_tokens = [len(tks) for tks in spec_tokens]
+        has_spec = any([n > 0 for n in num_spec_tokens])
+        if has_spec:
+            num_tokens = [len(tks) for tks in token_ids]
+            token_ids = [np.concatenate([tks, spec_tks]) for tks, spec_tks in zip(token_ids, spec_tokens)]
+            cu_num_tokens = 0
+            cu_logit_nums = 0
+            logits_indices = []
+            target_logits_indices = []
+            bonus_logits_indices = []
+            for cur_num_tks, cur_spec_tks in zip(num_tokens, num_spec_tokens):
+                cur_num = cur_num_tks + cur_spec_tks
+                logits_indices += [cu_num_tokens + i for i in range(cur_num - cur_spec_tks - 1, cur_num)]
+                target_logits_indices += [cu_logit_nums + i for i in range(cur_spec_tks)]
+                bonus_logits_indices.append(cu_logit_nums + cur_spec_tks)
+                cu_num_tokens += cur_num
+                cu_logit_nums += cur_spec_tks + 1
+
+            spec_metadata = SpecMetaData(
+                draft_token_ids=torch.as_tensor(np.concatenate(spec_tokens), dtype=torch.long),
+                num_draft_tokens=torch.as_tensor(num_spec_tokens, dtype=torch.long),
+                target_logits_indices=torch.as_tensor(target_logits_indices, dtype=torch.long),
+                bonus_logits_indices=torch.as_tensor(bonus_logits_indices, dtype=torch.long),
+                logits_indices=torch.as_tensor(logits_indices, dtype=torch.long),
+                max_spec_len=max(num_spec_tokens),
+            )
+        return spec_metadata, token_ids
+
+    @torch.inference_mode()
     @logging_timer('CreateModelInputs', logger)
     def create_model_inputs(self, messages: SeqList, is_prefill: bool):
         """Create model inputs from messages.
@@ -731,6 +794,13 @@ class Engine(EngineBase):
 
         # input ids
         token_ids = [msg.token_ids for msg in messages]
+
+        # spec decode
+        spec_metadata = None
+        if self.speculative_config is not None:
+            spec_metadata, token_ids = self._create_spec_inputs(messages, token_ids)
+            is_prefill = True
+
         input_ids = torch.as_tensor(np.concatenate(token_ids))[None]
 
         # seqlens
@@ -768,6 +838,7 @@ class Engine(EngineBase):
             max_kv_seqlen=max_kv_seqlen,
             sum_kv_seqlen=sum_kv_seqlen,
             model_metas=model_metas,
+            spec_metadata=spec_metadata,
         )
 
         # adapters
@@ -788,24 +859,35 @@ class Engine(EngineBase):
         # vision inputs
         vision_model_inputs = self._create_vision_model_inputs(messages, model_inputs)
         model_inputs.vision_inputs = vision_model_inputs
-
         return model_inputs
 
-    def update_running(self, running: SeqList, next_token_ids: torch.Tensor, stopped: torch.Tensor,
-                       model_metas: List[Dict[str, Any]]):
+    def update_running(self,
+                       running: SeqList,
+                       next_token_ids: torch.Tensor,
+                       stopped: torch.Tensor,
+                       model_metas: List[Dict[str, Any]],
+                       spec_token_ids: torch.Tensor = None):
         """Update scheduler."""
         if model_metas is None:
             model_metas = [None] * len(running)
+        if spec_token_ids is None:
+            spec_token_ids = [None] * len(running)
+        else:
+            spec_token_ids = spec_token_ids.numpy()
         next_token_ids = next_token_ids.numpy()
-        for token, msg, stop, model_meta in zip(next_token_ids, running, stopped, model_metas):
+        for tokens, msg, stop, model_meta, spec_tks in zip(next_token_ids, running, stopped, model_metas,
+                                                           spec_token_ids):
             if msg.status != MessageStatus.LOCKED:
                 continue
-            update_token = token
-
+            # filter padded token -1
+            tokens = [t for t in tokens if t > -1]
+            # stop index, default is -1, which means not stop
+            if stop > -1:
+                tokens = tokens[:stop + 1]
             # fill token
-            msg.update_token_ids(update_token, model_meta=model_meta)
-            msg.num_new_tokens += 1
-            if stop:
+            msg.update_token_ids(tokens, model_meta=model_meta, spec_token_ids=spec_tks)
+            msg.num_new_tokens += len(tokens)
+            if stop > -1:
                 msg.status = MessageStatus.TO_BE_MIGRATED if msg.preserve_cache else MessageStatus.STOPPED
 
     def update_running_migration(self, running: SeqList, next_token_ids: np.ndarray, stopped: torch.Tensor,
@@ -821,10 +903,35 @@ class Engine(EngineBase):
             # fill token
             msg.update_token_ids(update_token, model_meta=model_meta)
             msg.num_new_tokens += 1
-            if stop:
+            if stop != -1:
                 update_token = _EMPTY_TOKEN
                 msg.update_token_ids(update_token, model_meta=model_meta)
                 msg.status = MessageStatus.STOPPED
+
+    def _make_spec_stats(self, seqs: SeqList, next_token_ids: torch.LongTensor):
+        """Make spec stats."""
+        debug = True
+        all_stats = [None] * len(seqs)
+        if self.speculative_config is not None and (debug or self.engine_config.enable_metrics):
+            if debug and not hasattr(self, 'spec_stats'):
+                from lmdeploy.metrics.stats import SpeculativeDecodingStats
+                self.spec_stats = SpeculativeDecodingStats(self.speculative_config.num_speculative_tokens)
+
+            for idx, (msg, tokens) in enumerate(zip(seqs, next_token_ids.numpy())):
+                num_draft_tokens = len(msg.spec_token_ids)
+                if num_draft_tokens > 0:
+                    num_accepted_tokens = (tokens > -1).sum() - 1
+                    all_stats[idx] = dict(
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted_tokens,
+                    )
+                    if debug:
+                        self.spec_stats.update_per_draft(num_draft_tokens, num_accepted_tokens)
+            if debug or self.engine_config.enable_metrics:
+                if self.spec_stats.num_drafts > 0:
+                    print(self.spec_stats, flush=True)
+
+        return all_stats
 
     def _make_infer_outputs(
         self,
@@ -838,11 +945,15 @@ class Engine(EngineBase):
         stopped = batched_outputs.stopped
         model_metas = batched_outputs.model_metas
         logprobs = batched_outputs.logprobs
+        spec_token_ids = batched_outputs.spec_token_ids
+
+        # should call before update running
+        specdecode_stats = self._make_spec_stats(running, next_token_ids)
 
         seq_length = [seq.num_token_ids for seq in running]
         is_run = [seq.status == MessageStatus.LOCKED for seq in running]
         stopped = stopped.tolist()
-        self.update_running(running, next_token_ids, stopped, model_metas)
+        self.update_running(running, next_token_ids, stopped, model_metas, spec_token_ids)
 
         # generate output
         outputs: Dict[int, InferOutput] = dict()
@@ -865,7 +976,7 @@ class Engine(EngineBase):
             if num_logprobs >= 0:
                 cur_logprobs = (logprobs.vals[idx, :num_logprobs + 1], logprobs.indices[idx, :num_logprobs + 1])
 
-            req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events)
+            req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events, spec_info=specdecode_stats[idx])
             out = InferOutput(session_id=session_id,
                               resp=msg.resp,
                               finish=finish,
@@ -929,6 +1040,8 @@ class Engine(EngineBase):
 
         def __need_logits(seqs: SeqList):
             """Need logits."""
+            if self.speculative_config is not None:
+                return True
             return any(seq.return_logits for seq in seqs)
 
         scheduler = self.scheduler

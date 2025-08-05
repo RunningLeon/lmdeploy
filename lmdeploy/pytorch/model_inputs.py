@@ -123,6 +123,41 @@ def get_flatten_multimodals(vision_inputs: VisionModelInputs):
 
 
 @dataclass
+class SpecDecodeInputs:
+    # update after the forward of main model
+    target_logits: torch.Tensor = None
+    target_hidden_states: torch.Tensor = None
+    target_position_ids: torch.Tensor = None
+    bonus_token_ids: torch.LongTensor = None
+    next_token_ids: torch.LongTensor = None
+    num_rejected_tokens: torch.LongTensor = None
+    reject_sample_tokens: torch.LongTensor = None
+
+
+@dataclass
+class SpecMetaData:
+    draft_token_ids: torch.Tensor = None
+    num_draft_tokens: torch.Tensor = None
+    target_logits_indices: torch.Tensor = None
+    bonus_logits_indices: torch.Tensor = None
+    logits_indices: torch.Tensor = None
+    max_spec_len: int = 1
+
+    @torch.inference_mode()
+    def to_device(self, device: str, non_blocking: bool = False):
+        """To device."""
+        out_dict = dict()
+        for f in fields(self):
+            k = f.name
+            v = getattr(self, k)
+            if isinstance(v, torch.Tensor):
+                v = v.to(device, non_blocking=non_blocking)
+            out_dict[k] = v
+
+        return SpecMetaData(**out_dict)
+
+
+@dataclass
 class ModelInputs:
     """Input of the model."""
     input_ids: torch.LongTensor
@@ -141,6 +176,9 @@ class ModelInputs:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: 'DPMeta' = None
     enable_microbatch: bool = False
+    spec_metadata: SpecMetaData = None
+    target_hidden_states: torch.Tensor = None
+    target_position_ids: torch.Tensor = None
 
     def update(self, input_ids: torch.LongTensor):
         """Update input ids."""
@@ -271,6 +309,8 @@ class ModelInputs:
                 v = v.to(device, non_blocking=non_blocking)
             elif isinstance(v, VisionModelInputs):
                 v = v.to_device(device, non_blocking=non_blocking)
+            elif isinstance(v, SpecMetaData):
+                v = v.to_device(device, non_blocking=non_blocking)
             out_dict[k] = v
 
         return ModelInputs(**out_dict)
@@ -348,6 +388,8 @@ class StepContext:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: DPMeta = None
     enable_microbatch: bool = False
+    # for draft model
+    target_hidden_states: torch.Tensor = None
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -380,7 +422,6 @@ class StepContext:
 
         # position ids
         attention_mask, position_ids = cls.get_mask_and_position_ids(inputs)
-        position_ids = position_ids[None]  # [num_tokens] -> [1, num_tokens]
         q_start_loc = q_seqlens.cumsum(0) - q_seqlens
 
         # cross
@@ -416,6 +457,7 @@ class StepContext:
             cross_kv_seqlens=cross_kv_seqlens,
             dp_meta=inputs.dp_meta,
             enable_microbatch=inputs.enable_microbatch,
+            target_hidden_states=inputs.target_hidden_states,
         )
 
         ret = get_backend().update_step_context(ret)
@@ -426,12 +468,14 @@ class StepContext:
         """Get position ids."""
         q_seqlens = inputs.seq_length
         history_seqlens = inputs.history_lengths
-
+        target_position_ids = inputs.target_position_ids
         # decoding
         if inputs.is_decoding:
             attention_mask = torch.ones_like(q_seqlens)[:, None]
-            position_ids = history_seqlens.unsqueeze(-1).clone()
-            position_ids = position_ids.flatten()
+            if target_position_ids is not None:
+                position_ids = target_position_ids
+            else:
+                position_ids = history_seqlens.unsqueeze(0).clone()
             return attention_mask, position_ids
 
         num_tokens = inputs.input_ids.numel()
@@ -441,6 +485,8 @@ class StepContext:
         # get mask
         mask_range = torch.arange(max_q_seqlen, device=device)[None, :]
         attention_mask = (mask_range < q_seqlens[:, None]).long()
+        if target_position_ids is not None:
+            return attention_mask, target_position_ids
 
         # position_ids
         indices = attention_mask.long().cumsum(-1) - 1
@@ -448,7 +494,8 @@ class StepContext:
         indices[1:] += q_seqlens.cumsum(0)[:-1, None]
         position_ids_1d = position_ids.new_empty(num_tokens)
         position_ids_1d[indices.flatten()] = position_ids.flatten()
-        return attention_mask, position_ids_1d
+        position_ids = position_ids_1d[None]
+        return attention_mask, position_ids
 
 
 class StepContextManager:

@@ -13,7 +13,7 @@ def get_launching_server_cmd(model_path, backend, server_config):
     elif backend == 'sglang':
         cmd = ['python3', '-m', 'sglang.launch_server', '--model-path', model_path]
     elif backend == 'vllm':
-        cmd = ['vllm', 'serve', '--model', model_path]
+        cmd = ['vllm', 'serve', model_path]
     else:
         raise ValueError(f'unknown backend: {backend}')
     for key, value in server_config.items():
@@ -131,7 +131,7 @@ def benchmark(model_path: str, backend: str, server_config: Dict, data_config: D
 
     try:
 
-        print(f"Starting api_server: {' '.join(server_cmd)}")
+        print(f"Starting api_server: {' '.join(server_cmd)}", flush=True)
         proc = subprocess.Popen(server_cmd)
         # Wait for the server to be ready
         wait_server_ready(server_ip, server_port)

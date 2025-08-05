@@ -19,11 +19,12 @@ from lmdeploy.serve.openai.protocol import UpdateParamsRequest
 from lmdeploy.utils import get_logger
 
 from ..backends import get_backend
-from ..config import BackendConfig, CacheConfig, MiscConfig, ModelConfig
+from ..config import BackendConfig, CacheConfig, MiscConfig, ModelConfig, SpecDecodeConfig
 from ..devices import DeviceContext, get_device_manager
 from ..distributed import DistContext, get_dist_manager
-from ..model_inputs import ModelInputs, step_ctx_manager
+from ..model_inputs import ModelInputs, SpecDecodeInputs, step_ctx_manager
 from ..models.patch import BuildModelContext, add_adapters, build_patched_model, update_custom_module_map
+from ..spec_decode import build_specdecode_proposer
 from ..utils import get_gpu_memory
 from ..weight_loader.model_weight_loader import load_model_weights
 from .cache_engine import CacheEngine
@@ -65,6 +66,7 @@ class BatchedOutputs:
     logits: Optional[torch.Tensor] = None
     model_metas: List[Dict[str, Any]] = None
     logprobs: Optional[BatchedLogProbs] = None
+    spec_token_ids: Optional[torch.Tensor] = None
     new_token_timestamp: int = 0
 
     def to_cpu(self):
@@ -215,6 +217,7 @@ def model_forward(
     inputs: ModelInputs,
     cache_engine: CacheEngine,
     stream: torch.cuda.Stream = None,
+    output_position_ids: bool = False,
 ):
     """Perform model forward."""
     stream = stream or torch.cuda.current_stream()
@@ -227,6 +230,7 @@ def model_forward(
             kv_caches=cache_engine.gpu_cache,
             kv_quant_policy=cache_engine.cache_config.quant_policy,
         )
+        position_ids = context.position_ids
         with ctx_mgr.context(context):
             model_metas = None
             model_metas = model.update_model_metas(
@@ -238,11 +242,17 @@ def model_forward(
                 context=context,
             )
             output = model(**input_dict)
-    return dict(hidden_states=output, model_metas=model_metas)
+            if not isinstance(output, dict):
+                output = dict(hidden_states=output)
+            output.update(dict(model_metas=model_metas))
+            if output_position_ids:
+                output.update(dict(position_ids=position_ids))
+    return output
 
 
 @record_function('stopping_criteria')
-def _batch_stopping_criteria(token_ids: torch.Tensor, stop_words: torch.Tensor, num_appendable_ids: torch.Tensor):
+def _batch_stopping_criteria(token_ids: torch.Tensor, stop_words: Optional[torch.Tensor],
+                             num_appendable_ids: torch.Tensor):
     """Batched stopping criteria."""
     num_appendable_ids = num_appendable_ids - 1
     stopped = num_appendable_ids <= 0
@@ -252,6 +262,26 @@ def _batch_stopping_criteria(token_ids: torch.Tensor, stop_words: torch.Tensor, 
         one_ids = torch.clamp_max(num_appendable_ids, 0)
         num_appendable_ids = torch.where(sw_stopped, one_ids, num_appendable_ids)
     return stopped, num_appendable_ids
+
+
+@record_function('multi_stopping_criteria')
+def _batch_multi_stopping_criteria(token_ids: torch.Tensor, stop_words: Optional[torch.Tensor],
+                                   num_appendable_ids: torch.Tensor):
+    """Return the stop index in each seq, -1 if no stop word found."""
+    if token_ids.ndim == 1:
+        token_ids = token_ids.unsqueeze(-1)
+    mask = (num_appendable_ids.unsqueeze(-1) - (token_ids > -1).cumsum(dim=-1)) <= 0
+    if stop_words is not None:
+        token_ids_rsp = token_ids.unsqueeze(-1).repeat(1, 1, stop_words.numel())
+        stop_words_rsp = stop_words.reshape(1, 1, -1)
+        assert stop_words_rsp.ndim == token_ids_rsp.ndim == 3
+        stop_mask = (token_ids_rsp == stop_words_rsp).any(-1)
+        mask = mask ^ stop_mask
+    # find the index of first `1`,  if not found, would be 0
+    index = torch.argmax(mask.int(), dim=-1, keepdim=True)
+    # update index of 0 to -1 if not found
+    index = torch.where(index == 0, mask[:, 0:1].int() - 1, index).ravel()
+    return index
 
 
 def _try_to_cuda(val, non_blocking: bool = False):
@@ -289,6 +319,100 @@ class DistGatherScalar:
 SwapMap = Dict[int, int]
 
 
+class SpecModelAgent:
+    """Speculative model agent."""
+
+    def __init__(
+        self,
+        specdecode_config: SpecDecodeConfig,
+        backend_config: BackendConfig,
+        stream: torch.Stream,
+        device: str = 'cuda',
+    ):
+        from ..spec_decode import RejectionSampler
+        self.method = specdecode_config.method
+        self.model_config = specdecode_config.model_config
+        self.cache_config = specdecode_config.cache_config
+        self.backend_config = backend_config
+        self.device = device
+
+        self.proposer = build_specdecode_proposer(specdecode_config, device=device)
+        self.cache_engine = None
+        self.rejection_sampler = RejectionSampler()
+        self.stream = stream
+
+    def set_cache_config(self, cache_config: CacheConfig):
+        """Set all cache config."""
+        self.cache_config = cache_config
+
+    def set_model_config(self, model_config: ModelConfig):
+        """Set model config."""
+        self.model_config = model_config
+
+    def build_model(self, empty_init: bool, target_model=None):
+        """Build draft model."""
+        self.proposer.build_model(empty_init, target_model)
+
+    def build_graph_runner(self):
+        """Build graph runner."""
+        backend = get_backend()
+        self.proposer.model = backend.build_graph_runner(self.proposer.model,
+                                                         model_config=self.model_config,
+                                                         cache_config=self.cache_config,
+                                                         backend_config=self.backend_config,
+                                                         device=self.device)
+
+    def build_cache_engine(self, cache_stream: torch.cuda.Stream):
+        """Build cache engine."""
+        if self.cache_config is not None:
+            self.cache_engine = CacheEngine(self.cache_config, self.model_config, rank=0, tp_rank=0, world_size=1, cache_stream=cache_stream)
+
+    def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+        """Forward impl."""
+        cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+        output = self.proposer.propose(inputs, cache_engine=self.cache_engine, stream=self.stream)
+        return output
+
+    async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+        """Model forward.
+
+        Args:
+            inputs (Dict): The input data comes from _make_inputs.
+            swap_in_map (SwapMap): Cache maps to swap in.
+            swap_out_map (SwapMap): Cache maps to swap out.
+        """
+        output = self._forward_impl(inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+        await asyncio.sleep(0)
+        return output
+
+    async def async_model_forward(self,
+                                  model_inputs: ModelInputs,
+                                  spec_inputs: SpecDecodeInputs,
+                                  swap_in_map: SwapMap = dict(),
+                                  swap_out_map: SwapMap = dict()):
+        """Draft model forward."""
+        if model_inputs.spec_metadata.draft_token_ids is not None:
+            spec_metadata = model_inputs.spec_metadata
+            output_token_ids, num_rejected_tokens, last_token_ids = self.rejection_sampler(
+                spec_inputs.target_logits, spec_metadata.draft_token_ids, spec_inputs.bonus_token_ids,
+                spec_metadata.num_draft_tokens, spec_metadata.max_spec_len)
+            spec_inputs.num_rejected_tokens = num_rejected_tokens
+            spec_inputs.reject_sample_tokens = output_token_ids
+            spec_inputs.next_token_ids = last_token_ids
+        else:
+            spec_inputs.next_token_ids = spec_inputs.bonus_token_ids
+            output_token_ids = spec_inputs.next_token_ids.unsqueeze(-1)
+
+        with record_function('draft_prepare_inputs'):
+            draft_model_inputs = self.proposer.prepare_inputs(model_inputs, spec_inputs)
+
+        new_draft_tokens = await self.async_forward(draft_model_inputs,
+                                                    swap_in_map=swap_in_map,
+                                                    swap_out_map=swap_out_map)
+        outputs = dict(output_token_ids=output_token_ids, spec_token_ids=new_draft_tokens)
+        return outputs
+
+
 class BaseModelAgent:
     """Base model agent.
 
@@ -301,16 +425,19 @@ class BaseModelAgent:
         trust_remote_code (bool): Trust remote code
     """
 
-    def __init__(self,
-                 model_path: str,
-                 model_config: ModelConfig,
-                 cache_config: CacheConfig,
-                 backend_config: BackendConfig,
-                 misc_config: MiscConfig,
-                 tokenizer: Any,
-                 dist_ctx: DistContext,
-                 device_ctx: DeviceContext,
-                 adapters: Dict[str, str] = None):
+    def __init__(
+        self,
+        model_path: str,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        backend_config: BackendConfig,
+        misc_config: MiscConfig,
+        tokenizer: Any,
+        dist_ctx: DistContext,
+        device_ctx: DeviceContext,
+        adapters: Dict[str, str] = None,
+        specdecode_config: SpecDecodeConfig = None,
+    ):
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -349,6 +476,12 @@ class BaseModelAgent:
         self.tp = tp
         self.world_size = world_size
         self.tp_rank = tp_rank
+        self.spec_agent = None
+        self.specdecode_config = specdecode_config
+
+        # only support spec model with tp1
+        if (dist_ctx.dp > 1 or rank % tp == 0) and specdecode_config is not None:
+            self.spec_agent = SpecModelAgent(specdecode_config, backend_config, self.stream, device)
 
         self.patched_model = None
         self.cache_engine = None
@@ -370,13 +503,17 @@ class BaseModelAgent:
         with device_mgr.context(self.device_ctx), dist_mgr.context(self.dist_ctx):
             yield
 
-    def set_cache_config(self, cache_config: CacheConfig):
+    def set_cache_config(self, cache_config: CacheConfig, spec_cache_config: CacheConfig = None):
         """Set all cache config."""
         self.cache_config = cache_config
+        if self.spec_agent is not None:
+            self.spec_agent.set_cache_config(spec_cache_config)
 
-    def set_model_config(self, model_config: ModelConfig):
+    def set_model_config(self, model_config: ModelConfig, spec_model_config: ModelConfig = None):
         """Set model config."""
         self.model_config = model_config
+        if self.spec_agent is not None:
+            self.spec_agent.set_model_config(spec_model_config)
 
     def get_free_mem(self):
         """Gather available memory."""
@@ -416,10 +553,13 @@ class BaseModelAgent:
         swap_out_map: Dict,
         return_logits: bool,
         sync_long_context: bool,
+        need_output: bool,
     ):
         """Model forward."""
         max_prefill_token_num = self.cache_config.max_prefill_token_num
         swap_done = False
+        spec_metadata = inputs.spec_metadata
+        orig_seq_length = inputs.seq_length
 
         class _OutputGather:
             """Output gather."""
@@ -428,6 +568,8 @@ class BaseModelAgent:
                 self._max_seq_len = max_seq_len
                 self._start = 0
                 self._output = None
+                # aux hidden states for eagle3
+                self._aux_output = None
 
             def gather(self, output):
                 """gather."""
@@ -443,6 +585,16 @@ class BaseModelAgent:
                 if out_logits is None:
                     out_logits = tmp_output.new_empty(1, self._max_seq_len, tmp_output.size(-1), device='cpu')
                 out_logits[:, start:start + seq_len].copy_(tmp_output, non_blocking=True)
+
+                # egale3
+                if 'aux_hidden_states' in output:
+                    tmp_aux = output['aux_hidden_states']
+                    aux_out = self._aux_output
+                    if aux_out is None:
+                        aux_out = tmp_aux.new_empty(1, self._max_seq_len, tmp_aux.size(-1), device='cpu')
+                    aux_out[:, start:start + seq_len].copy_(tmp_aux, non_blocking=True)
+                    self._aux_output = aux_out
+
                 self._start = start + seq_len
                 self._output = out_logits
 
@@ -451,7 +603,7 @@ class BaseModelAgent:
                 if not return_logits:
                     return self._output[:, -1:]
                 torch.cuda.synchronize()
-                return self._output
+                return self._output, self._aux_output
 
         async def __forward(inputs):
             """forward."""
@@ -474,13 +626,21 @@ class BaseModelAgent:
                 inp.model_metas = model_metas
                 tmp_out = await __forward(inp)
                 model_metas = tmp_out.get('model_metas')
-                output_gather.gather(tmp_out)
-                tmp_out.pop('hidden_states', None)
-            tmp_out['hidden_states'] = output_gather.get_output()
+                if need_output:
+                    output_gather.gather(tmp_out)
+                    tmp_out.pop('hidden_states', None)
+                    tmp_out.pop('aux_hidden_states', None)
+                    tmp_out.pop('position_ids', None)
+
+            if need_output:
+                tmp_out['hidden_states'], aux_hidden_states = output_gather.get_output()
+                if aux_hidden_states is not None:
+                    tmp_out['aux_hidden_states'] = aux_hidden_states
             return tmp_out
 
         # make long context inputs
-        is_long_context = inputs.input_ids.numel() > max_prefill_token_num and not inputs.is_decoding
+        is_long_context = inputs.input_ids.numel(
+        ) > max_prefill_token_num and not inputs.is_decoding and inputs.seq_length[0] == 1
         max_seqlen = 0
         if is_long_context:
             seq_len = inputs.seq_length
@@ -501,16 +661,18 @@ class BaseModelAgent:
 
         if not is_long_context:
             ret = await __forward(inputs)
-            if not return_logits and not inputs.is_decoding:
-                last_token_loc = inputs.seq_length.cumsum(0) - 1
-                ret['hidden_states'] = ret['hidden_states'][:, last_token_loc]
+            if need_output:
+                if not return_logits and not inputs.is_decoding:
+                    last_token_loc = inputs.seq_length.cumsum(0) - 1
+                    ret['hidden_states'] = ret['hidden_states'][:, last_token_loc]
         else:
             ret = await __long_context_single_forward(inputs, max_seqlen)
-            if not return_logits:
-                last_token_loc = [-1]
-                ret['hidden_states'] = ret['hidden_states'][:, last_token_loc]
-            else:
-                ret['hidden_states'] = ret['hidden_states'].to('cuda')
+            if need_output:
+                if not return_logits:
+                    last_token_loc = [-1]
+                    ret['hidden_states'] = ret['hidden_states'][:, last_token_loc]
+                else:
+                    ret['hidden_states'] = ret['hidden_states'].to('cuda')
 
         # compute dummy loop
         if dummy_loop > 0:
@@ -518,9 +680,20 @@ class BaseModelAgent:
         for _ in range(dummy_loop):
             await __forward(dummy_inputs)
 
-        hidden_states = ret.pop('hidden_states')
-        logits = self.get_logits(hidden_states)
-        ret['logits'] = logits
+        if need_output:
+            if self.spec_agent is not None:
+                hidden_states = ret['hidden_states']
+                logits_indices = spec_metadata.logits_indices
+                if logits_indices is None:
+                    logits_indices = orig_seq_length.cumsum(0) - 1
+                hidden_states = hidden_states[:, logits_indices]
+                if 'aux_hidden_states' in ret:
+                    # replace with aux
+                    ret['hidden_states'] = ret.pop('aux_hidden_states')
+            else:
+                hidden_states = ret.pop('hidden_states')
+            logits = self.get_logits(hidden_states)
+            ret['logits'] = logits
         return ret
 
     async def async_sampling_logits(self, logits: torch.Tensor, all_ids: torch.Tensor, guided_input_ids: torch.Tensor,
@@ -704,25 +877,50 @@ class BaseModelAgent:
                 swap_out_map=swap_out_map,
                 return_logits=return_logits,
                 sync_long_context=sync_long_context,
+                need_output=need_output,
             )
-            logits = output['logits']
-            logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
-
             # output empty for dummy inputs
             if is_dummy:
                 continue
 
+            model_metas = output.get('model_metas')
+            spec_token_ids = None
             # sampling and stopping
             if need_output:
+                logits = output['logits']
+                logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
                 logger.debug(f'<ForwardTask> rank[{rank}]: Sampling [{idx}].')
                 # sampling
+                spec_inputs = SpecDecodeInputs()
+                if self.spec_agent is not None:
+                    spec_metadata = inputs.spec_metadata
+                    spec_inputs.target_hidden_states = output['hidden_states']
+                    spec_inputs.target_position_ids = output.get('position_ids', None)
+                    if spec_metadata.bonus_logits_indices is not None:
+                        bonus_logits = logits[spec_metadata.bonus_logits_indices]
+                        spec_inputs.target_logits = logits[spec_metadata.target_logits_indices]
+                        logits = bonus_logits
+                    # only sample on bonus logits
                 next_token_ids, logprobs = await self.async_sampling_logits(logits, all_ids, guided_input_ids,
                                                                             sampling_inputs, inputs, num_ignore_eos > 0)
-                num_ignore_eos = num_ignore_eos - 1
 
-                # stopping criteria
-                stopped, num_appendable_ids = _batch_stopping_criteria(next_token_ids, sampling_inputs.stop_words,
-                                                                       num_appendable_ids)
+                if self.spec_agent is not None:
+                    spec_inputs.bonus_token_ids = next_token_ids
+                    spec_inputs.next_token_ids = next_token_ids
+                    spec_outs = await self.spec_agent.async_model_forward(inputs, spec_inputs)
+                    output_token_ids = spec_outs['output_token_ids']
+                    spec_token_ids = spec_outs['spec_token_ids']
+                    stopped = _batch_multi_stopping_criteria(output_token_ids, sampling_inputs.stop_words,
+                                                             num_appendable_ids)
+                    next_token_ids = output_token_ids
+                    logits = None
+                else:
+                    num_ignore_eos = num_ignore_eos - 1
+                    # stopping criteria
+                    stopped, num_appendable_ids = _batch_stopping_criteria(next_token_ids, sampling_inputs.stop_words,
+                                                                           num_appendable_ids)
+                    stopped = stopped.int() - 1
+                    next_token_ids = next_token_ids.unsqueeze(-1)
             else:
                 # Avoid adding the ADInplaceOrView dispatch key to `next_token_ids`,
                 # as it can trigger recompilation on different ranks when using torch.compile.
@@ -737,7 +935,6 @@ class BaseModelAgent:
                 next_token_ids = self._broadcast_next_token(next_token_ids, dist_ctx)
 
             # send output
-            model_metas = output.get('model_metas')
             if need_output:
                 logger.debug(f'<ForwardTask> rank[{rank}]: Output [{idx}]')
                 self._push_output(
@@ -745,11 +942,12 @@ class BaseModelAgent:
                                    logits=logits if return_logits else None,
                                    stopped=stopped,
                                    model_metas=model_metas,
-                                   logprobs=logprobs))
+                                   logprobs=logprobs,
+                                   spec_token_ids=spec_token_ids))
 
             # update for next loop
             if is_decoding and idx < loop_count - 1:
-                __update_inputs(next_token_ids, model_metas)
+                __update_inputs(next_token_ids.transpose(0, 1), model_metas)
 
     async def _async_loop_background(self, forward_event: asyncio.Event = None):
         """Async loop background."""
@@ -930,6 +1128,8 @@ class BaseModelAgent:
         """Build model api."""
         with self.all_context():
             self._build_model()
+            if self.spec_agent is not None:
+                self.spec_agent.build_model(self.misc_config.empty_init, self.patched_model)
 
     def build_graph_runner(self):
         """Build graph runner."""
@@ -940,6 +1140,8 @@ class BaseModelAgent:
                                                             cache_config=self.cache_config,
                                                             backend_config=self.backend_config,
                                                             device=self.device)
+            if self.spec_agent is not None:
+                self.spec_agent.build_graph_runner()
 
     def build_cache_engine(self):
         """Build cache engine."""
@@ -954,15 +1156,16 @@ class BaseModelAgent:
                                             tp_rank=self.tp_rank,
                                             world_size=tp,
                                             cache_stream=self.cache_stream)
+            if self.spec_agent is not None:
+                self.spec_agent.build_cache_engine(self.cache_stream)
 
     def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
         cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
-        output = model_forward(
-            self.patched_model,
-            inputs,
-            self.cache_engine,
-            stream=self.stream,
-        )
+        output = model_forward(self.patched_model,
+                               inputs,
+                               self.cache_engine,
+                               stream=self.stream,
+                               output_position_ids=self.spec_agent is not None)
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
@@ -1153,15 +1356,18 @@ class DPForwardInputsMaker:
         self._ready_event.record()
 
 
-def build_model_agent(model_path: str,
-                      model_config: ModelConfig,
-                      cache_config: CacheConfig,
-                      backend_config: BackendConfig,
-                      misc_config: MiscConfig,
-                      tokenizer: Any,
-                      dist_ctx: DistContext = None,
-                      device_ctx: DeviceContext = None,
-                      adapters: Dict[str, str] = None):
+def build_model_agent(
+    model_path: str,
+    model_config: ModelConfig,
+    cache_config: CacheConfig,
+    backend_config: BackendConfig,
+    misc_config: MiscConfig,
+    tokenizer: Any,
+    dist_ctx: DistContext = None,
+    device_ctx: DeviceContext = None,
+    adapters: Dict[str, str] = None,
+    specdecode_config: SpecDecodeConfig = None,
+):
     """Create model agent.
 
     Args:
@@ -1191,5 +1397,6 @@ def build_model_agent(model_path: str,
         adapters=adapters,
         dist_ctx=dist_ctx,
         device_ctx=device_ctx,
+        specdecode_config=specdecode_config,
     )
     return model_agent

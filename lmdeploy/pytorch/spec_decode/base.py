@@ -1,0 +1,125 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+from typing import Any, List, Optional
+
+import torch
+from mmengine import Registry
+
+from lmdeploy.utils import get_logger
+
+from ..config import ModelConfig, SpecDecodeConfig
+from ..engine.cache_engine import CacheEngine
+from ..model_inputs import ModelInputs, SpecDecodeInputs, step_ctx_manager
+from ..models.patch import build_patched_model, update_custom_module_map
+from ..weight_loader.model_weight_loader import load_model_weights
+
+SPEC_PROPOSERS = Registry('vision_model')
+
+logger = get_logger('lmdeploy')
+
+
+@torch.inference_mode()
+def draft_model_forward(
+    model: torch.nn.Module,
+    inputs: ModelInputs,
+    model_config: Optional[ModelConfig] = None,
+    cache_engine: Optional[CacheEngine] = None,
+    stream: Optional[torch.cuda.Stream] = None,
+):
+    """Perform model forward."""
+    stream = stream or torch.cuda.current_stream()
+    with torch.cuda.stream(stream), step_ctx_manager(model.ctx_mgr):
+        # forward
+        ctx_mgr = model.ctx_mgr
+        kv_caches = None if cache_engine is None else cache_engine.gpu_cache
+        context = ctx_mgr.build_context(
+            inputs=inputs,
+            model_config=model_config,
+            kv_caches=kv_caches,
+        )
+        with ctx_mgr.context(context):
+            model_metas = None
+            model_metas = model.update_model_metas(
+                past_key_values=kv_caches,
+                context=context,
+            )
+            input_dict = model.prepare_inputs_for_generation(
+                past_key_values=kv_caches,
+                context=context,
+            )
+            outputs = model(**input_dict)
+            if not isinstance(outputs, dict):
+                outputs = dict(hidden_states=outputs)
+            outputs.update(dict(model_metas=model_metas))
+    return outputs
+
+
+class BaseSpecProposer:
+
+    def __init__(self, specdecode_config: SpecDecodeConfig, device: torch.device = None):
+        self.specdecode_config = specdecode_config
+        self.model = None
+        self.device = device
+        self.lm_head = None
+        self.num_speculative_tokens = specdecode_config.num_speculative_tokens
+        self.target_model = None
+
+    def build_model(self, empty_init: bool, target_model: torch.nn.Module = None):
+        if self.specdecode_config is None:
+            return
+        model_path = self.specdecode_config.model
+        model_config = self.specdecode_config.model_config
+        custom_module_map = model_config.custom_module_map
+        if custom_module_map is not None:
+            update_custom_module_map(custom_module_map)
+        logger.debug('build draft model')
+        patched_model = build_patched_model(model_config, device=self.device)
+        logger.debug('loading weights for draft model.')
+        if not empty_init:
+            load_model_weights(patched_model, model_path, device=self.device)
+        self.model = patched_model
+        self.target_model = target_model
+
+    def propose(self, model_inputs: ModelInputs, cache_engine: CacheEngine = None, stream: torch.cuda.Stream = None):
+        raise NotImplementedError()
+
+    def prepare_inputs(self, model_inputs: ModelInputs, spec_inputs: SpecDecodeInputs):
+        """Prepare inputs."""
+        raise NotImplementedError()
+
+    def update_inputs_decoding(self, model_inputs: ModelInputs, input_ids: torch.Tensor,
+                               target_hidden_states: torch.Tensor, model_metas: List[Any]):
+        """Update to decoding inputs."""
+        model_inputs.is_decoding = True
+        batch_size = model_inputs.seq_length.size(0)
+        model_inputs.input_ids = input_ids
+        model_inputs.max_q_seqlen = 1
+        model_inputs.max_kv_seqlen += 1
+        model_inputs.sum_kv_seqlen += model_inputs.seq_length.numel()
+        model_inputs.history_lengths += model_inputs.seq_length
+        model_inputs.seq_length = model_inputs.seq_length.new_ones(batch_size)
+        model_inputs.target_position_ids = model_inputs.history_lengths.unsqueeze(0).clone()
+        model_inputs.model_metas = model_metas
+        model_inputs.target_hidden_states = target_hidden_states
+        return model_inputs
+
+    def get_logits(self, hidden_states: torch.Tensor):
+        """Get logits of model output."""
+        draft_model = self.model
+        if not isinstance(draft_model, torch.nn.Module):
+            draft_model = draft_model.model
+
+        if hasattr(draft_model, 'get_logits'):
+            logits = draft_model.get_logits(hidden_states)
+        else:
+            logits = self.target_model.get_logits(hidden_states)
+        return logits
+
+
+def build_specdecode_proposer(specdecode_config: SpecDecodeConfig, device: str = 'cuda'):
+    """Build spec decoding proposer."""
+    method = specdecode_config.method
+    if method in SPEC_PROPOSERS.module_dict:
+        spec_cls = SPEC_PROPOSERS.module_dict[method]
+        obj = spec_cls(specdecode_config, device=device)
+        return obj
+    raise ValueError(f'{method} not found in {SPEC_PROPOSERS.module_dict.keys()}')

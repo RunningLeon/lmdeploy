@@ -475,6 +475,9 @@ class SchedulerSequence:
 
     # For logging
     engine_events: List[EngineEvent] = field(default_factory=list)
+    
+    # spec decode
+    spec_token_ids: np.ndarray = np.empty(0, dtype=np.int64)
 
     def __post_init__(self):
         """Post init."""
@@ -596,12 +599,15 @@ class SchedulerSequence:
         end = self.num_all_ids
         return self.history_multimodals.get_datas(start, end)
 
-    def update_token_ids(self,
-                         token_ids: Tensor,
-                         multimodals: MultiModalInputs = None,
-                         embeddings: List[InputEmbeddings] = None,
-                         model_meta: Dict[str, Any] = None,
-                         append_tokens: bool = False):
+    def update_token_ids(
+        self,
+        token_ids: Tensor,
+        multimodals: MultiModalInputs = None,
+        embeddings: List[InputEmbeddings] = None,
+        model_meta: Dict[str, Any] = None,
+        append_tokens: bool = False,
+        spec_token_ids: np.ndarray = None,
+    ):
         """Update token ids, old token ids will be added to history."""
         old_num_history_ids = self._num_history_ids
 
@@ -645,6 +651,8 @@ class SchedulerSequence:
         self.history_cache.append(token_ids)
         self.random_offsets += 1
         self.arrive_time = time.perf_counter()
+        if spec_token_ids is not None:
+            self.spec_token_ids = spec_token_ids
 
     def set_step(self, step: int):
         """Set step."""
@@ -660,7 +668,7 @@ class SchedulerSequence:
         self.num_ignored_history = min(step, self.num_ignored_history)
 
         self.model_meta = None
-
+        self.spec_token_ids = np.empty(0, dtype=np.int64)
         # cross
         if self.history_multimodals is not None:
             self._num_history_cross = self.history_multimodals.get_encoder_len(0, self.num_history_ids)

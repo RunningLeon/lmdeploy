@@ -36,10 +36,10 @@ class Scheduler:
         cache_config (CacheConfig): The config of cache info.
     """
 
-    def __init__(self, scheduler_config: SchedulerConfig, cache_config: CacheConfig) -> None:
+    def __init__(self, scheduler_config: SchedulerConfig, cache_config: CacheConfig, num_spec_tokens: int = 0) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
-
+        self.num_spec_tokens = num_spec_tokens
         self.sessions: Dict[int, SchedulerSession] = OrderedDict()
 
         # For Disaggregation
@@ -196,6 +196,8 @@ class Scheduler:
             running.append(seq)
             nonlocal token_count
             token_count += seq.num_token_ids
+            token_count += self.num_spec_tokens
+            token_count += len(seq.spec_token_ids)
 
         def __evict_for_seq(seq: SchedulerSequence, waiting):
             """Evict until can append."""
@@ -203,7 +205,7 @@ class Scheduler:
             hanging = reversed(self.hanging)
             waiting = reversed(waiting)
             evictable = list(chain(hanging, waiting))
-            return eviction_helper.evict_for_seq(seq, evictable, 0)
+            return eviction_helper.evict_for_seq(seq, evictable, prealloc_size=self.num_spec_tokens)
 
         def _reorder_waiting():
             """Reorder waiting."""
@@ -216,8 +218,8 @@ class Scheduler:
         waiting = _reorder_waiting()
         while len(waiting) > 0 and len(running) < max_batches:
             seq = waiting.pop(0)
-
-            if (len(running) > 0 and token_count + seq.num_token_ids > self.cache_config.max_prefill_token_num):
+            cur_token_count = token_count + seq.num_token_ids + self.num_spec_tokens + len(seq.spec_token_ids)
+            if (len(running) > 0 and cur_token_count > self.cache_config.max_prefill_token_num):
                 break
 
             self.block_trie.match(seq)
@@ -226,7 +228,7 @@ class Scheduler:
                 break
 
             # allocate session memory
-            self.block_manager.allocate(seq)
+            self.block_manager.allocate(seq, prealloc_size=self.num_spec_tokens)
             _to_running(seq)
 
             seq.record_event(EventType.SCHEDULED)
@@ -244,6 +246,7 @@ class Scheduler:
         swap_out_map: Dict[int, int] = dict()
         swap_in_map: Dict[int, int] = dict()
         copy_map: Dict[int, int] = dict()
+        prealloc_size += self.num_spec_tokens
 
         def __evict_for_seq(seq: SchedulerSequence, num_required_blocks: int):
             """Evict until can append."""
