@@ -27,6 +27,10 @@ class DefaultBlockManager(BaseBlockManager):
         """Get num required blocks."""
         num_tokens = obj.num_all_ids + prealloc_size
 
+        # allocate for spec_tokens
+        if obj.spec_token_ids is not None:
+            num_tokens += len(obj.spec_token_ids)
+
         # cross tokens
         num_cross = obj.num_all_cross_tokens()
         num_tokens = max(num_tokens, num_cross)

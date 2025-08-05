@@ -1,8 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from lmdeploy.pytorch.config import MiscConfig, ModelConfig
+from lmdeploy.pytorch.config import MiscConfig, ModelConfig, SpecDecodeConfig
 
 
-def build_strategy_factory(model_config: ModelConfig, misc_config: MiscConfig):
+def build_strategy_factory(model_config: ModelConfig, misc_config: MiscConfig, specdecode_config: SpecDecodeConfig = None):
     """Build strategy factory."""
     model_paradigm = model_config.model_paradigm
 

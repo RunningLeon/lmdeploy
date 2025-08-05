@@ -13,7 +13,7 @@ class DeepseekV2ModelConfigBuilder(AutoModelConfigBuilder):
         return hf_config.model_type in ['deepseek_v3', 'deepseek_v2']
 
     @classmethod
-    def build(cls, hf_config, model_path: str = None, **kwargs):
+    def build(cls, hf_config, model_path: str = None, is_draft_model: bool = False, speculative_config=None, **kwargs):
         """build."""
         head_dim = (hf_config.kv_lora_rank + hf_config.qk_rope_head_dim)
         k_head_dim = head_dim
@@ -25,9 +25,18 @@ class DeepseekV2ModelConfigBuilder(AutoModelConfigBuilder):
         # update num_kv_heads for tp mode
         num_key_value_heads = cls.update_num_kv_heads(hf_config, tp, num_key_value_heads)
         hf_config.use_flash_mla = flash_mla_available()
+        num_layers = hf_config.num_hidden_layers
+
+        # draft model cfg
+        if is_draft_model and speculative_config is not None:
+            assert speculative_config.method == 'deepseek_mtp'
+            num_layers = hf_config.num_nextn_predict_layers
+            hf_config.architectures[0] = 'DeepseekMTPModel'
+            # remove for correct mapping when building the patched model
+            del hf_config.auto_map
 
         return ModelConfig(hidden_size=hf_config.hidden_size,
-                           num_layers=hf_config.num_hidden_layers,
+                           num_layers=num_layers,
                            num_attention_heads=num_attention_heads,
                            num_key_value_heads=num_key_value_heads,
                            bos_token_id=hf_config.bos_token_id,

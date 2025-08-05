@@ -126,6 +126,42 @@ def get_flatten_multimodals(vision_inputs: VisionModelInputs):
 
 
 @dataclass
+class SpecDecodeInputs:
+    # update after the forward of main model
+    target_logits: torch.Tensor = None
+    target_hidden_states: torch.Tensor = None
+    target_position_ids: torch.Tensor = None
+    bonus_token_ids: torch.LongTensor = None
+    next_token_ids: torch.LongTensor = None
+    num_rejected_tokens: torch.LongTensor = None
+    reject_sample_tokens: torch.LongTensor = None
+    last_token_indices: torch.LongTensor = None
+
+
+@dataclass
+class SpecMetaData:
+    draft_token_ids: torch.Tensor = None
+    num_draft_tokens: torch.Tensor = None
+    target_logits_indices: torch.Tensor = None
+    bonus_logits_indices: torch.Tensor = None
+    logits_indices: torch.Tensor = None
+    max_spec_len: int = 1
+
+    @torch.inference_mode()
+    def to_device(self, device: str, non_blocking: bool = False):
+        """To device."""
+        out_dict = dict()
+        for f in fields(self):
+            k = f.name
+            v = getattr(self, k)
+            if isinstance(v, torch.Tensor):
+                v = v.to(device, non_blocking=non_blocking)
+            out_dict[k] = v
+
+        return SpecMetaData(**out_dict)
+
+
+@dataclass
 class ModelInputs:
     """Input of the model."""
     input_ids: torch.LongTensor
@@ -144,6 +180,9 @@ class ModelInputs:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: 'DPMeta' = None
     enable_microbatch: bool = False
+    spec_metadata: SpecMetaData = None
+    target_hidden_states: torch.Tensor = None
+    target_position_ids: torch.Tensor = None
 
     def step(self, input_ids: torch.LongTensor, step_seqlens: torch.Tensor = None):
         """Update input ids."""
@@ -241,22 +280,26 @@ class ModelInputs:
             max_q_seqlen = end - start
             if isinstance(max_q_seqlen, torch.Tensor):
                 max_q_seqlen = max_q_seqlen.item()
-            inp = ModelInputs(
-                input_ids=self.input_ids[:, start:end],
-                seq_length=input_ids.new_tensor([end - start]),
-                block_offsets=self.block_offsets,
-                history_lengths=self.history_lengths + start,
-                is_decoding=self.is_decoding,
-                num_ignored_history=self.num_ignored_history,
-                max_q_seqlen=max_q_seqlen,
-                max_kv_seqlen=max_kv_seqlen,
-                sum_kv_seqlen=max_kv_seqlen,
-                local_adapter_ids=self.local_adapter_ids,
-                vision_inputs=vision_inputs,
-                model_metas=self.model_metas,
-                cross_length=cross_length,
-                history_cross_length=history_cross_length,
-            )
+            target_hidden_states = self.target_hidden_states[:, start:
+                                                             end] if self.target_hidden_states is not None else None
+            target_position_ids = self.target_position_ids[:,
+                                                           start:end] if self.target_position_ids is not None else None
+            inp = ModelInputs(input_ids=self.input_ids[:, start:end],
+                              seq_length=input_ids.new_tensor([end - start]),
+                              block_offsets=self.block_offsets,
+                              history_lengths=self.history_lengths + start,
+                              is_decoding=self.is_decoding,
+                              num_ignored_history=self.num_ignored_history,
+                              max_q_seqlen=max_q_seqlen,
+                              max_kv_seqlen=max_kv_seqlen,
+                              sum_kv_seqlen=max_kv_seqlen,
+                              local_adapter_ids=self.local_adapter_ids,
+                              vision_inputs=vision_inputs,
+                              model_metas=self.model_metas,
+                              cross_length=cross_length,
+                              history_cross_length=history_cross_length,
+                              target_hidden_states=target_hidden_states,
+                              target_position_ids=target_position_ids)
             ret.append(inp)
             history_cross_length = cross_length
             max_kv_seqlen += max_q_seqlen
@@ -275,6 +318,8 @@ class ModelInputs:
             if isinstance(v, torch.Tensor):
                 v = v.to(device, non_blocking=non_blocking)
             elif isinstance(v, VisionModelInputs):
+                v = v.to_device(device, non_blocking=non_blocking)
+            elif isinstance(v, SpecMetaData):
                 v = v.to_device(device, non_blocking=non_blocking)
             out_dict[k] = v
 
@@ -321,6 +366,8 @@ class StepContext:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: DPMeta = None
     enable_microbatch: bool = False
+    # for draft model
+    target_hidden_states: torch.Tensor = None
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -353,7 +400,6 @@ class StepContext:
 
         # position ids
         attention_mask, position_ids = cls.get_mask_and_position_ids(inputs)
-        position_ids = position_ids[None]  # [num_tokens] -> [1, num_tokens]
         q_start_loc = q_seqlens.cumsum(0) - q_seqlens
 
         # cross
@@ -389,6 +435,7 @@ class StepContext:
             cross_kv_seqlens=cross_kv_seqlens,
             dp_meta=inputs.dp_meta,
             enable_microbatch=inputs.enable_microbatch,
+            target_hidden_states=inputs.target_hidden_states,
         )
 
         ret = get_backend().update_step_context(ret)
@@ -400,12 +447,14 @@ class StepContext:
         q_seqlens = inputs.seq_length
         history_seqlens = inputs.history_lengths
         max_q_seqlen = inputs.max_q_seqlen
-
+        target_position_ids = inputs.target_position_ids
         # decoding
         if max_q_seqlen == 1:
             attention_mask = torch.ones_like(q_seqlens)[:, None]
-            position_ids = history_seqlens.unsqueeze(-1).clone()
-            position_ids = position_ids.flatten()
+            if target_position_ids is not None:
+                position_ids = target_position_ids
+            else:
+                position_ids = history_seqlens.unsqueeze(0).clone()
             return attention_mask, position_ids
 
         num_tokens = inputs.input_ids.numel()
@@ -423,6 +472,8 @@ class StepContext:
         # get mask
         mask_range = torch.arange(max_q_seqlen, device=device)[None, :]
         attention_mask = (mask_range < q_seqlens[:, None]).long()
+        if target_position_ids is not None:
+            return attention_mask, target_position_ids
 
         # position_ids
         indices = attention_mask.long().cumsum(-1) - 1
@@ -430,7 +481,8 @@ class StepContext:
         indices[1:] += q_seqlens.cumsum(0)[:-1, None]
         position_ids_1d = position_ids.new_empty(num_tokens)
         position_ids_1d[indices.flatten()] = position_ids.flatten()
-        return attention_mask, position_ids_1d
+        position_ids = position_ids_1d[None]
+        return attention_mask, position_ids
 
 
 @dataclass

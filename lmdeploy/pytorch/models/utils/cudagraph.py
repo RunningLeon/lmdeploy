@@ -64,16 +64,22 @@ class CudaGraphMixin:
                                                    dtype=torch.int64,
                                                    device=device)
         input_buffers['position_ids'] = torch.zeros((1, max_tokens), dtype=torch.int64, device=device)
-        if getattr(self.config, 'use_flash_mla', False) is True:
+        seqlens_dtype = torch.int64
+        use_flash_mla = getattr(self.config, 'use_flash_mla', False)
+        use_flash_attn3 = getattr(self.config, 'use_flash_attn3', False)
+        if use_flash_attn3 and not graph_meta.is_decoding:
+            seqlens_dtype = torch.int32
+        if use_flash_mla is True:
             import flash_mla
-
+            if graph_meta.is_decoding:
+                seqlens_dtype = torch.int32
             # create buffers for flash mla
             input_buffers['tile_scheduler_metadata'], input_buffers['num_splits'] = flash_mla.get_mla_metadata(
                 torch.ones(max_batches, dtype=torch.int32, device=device), self.config.num_attention_heads, 1)
 
         # flash_mla requires block_offsets and kv_lens int32
-        input_buffers['block_offsets'] = torch.zeros((max_batches, num_blocks), dtype=torch.int32, device=device)
-        input_buffers['qkv_lens'] = torch.zeros(3, max_batches, dtype=torch.int32, device=device)
+        input_buffers['block_offsets'] = torch.zeros((max_batches, num_blocks), dtype=seqlens_dtype, device=device)
+        input_buffers['qkv_lens'] = torch.zeros(3, max_batches, dtype=seqlens_dtype, device=device)
 
         input_buffers['q_start_loc'] = input_buffers['qkv_lens'][0]
         input_buffers['q_seqlens'] = input_buffers['qkv_lens'][1]
@@ -170,3 +176,10 @@ class CudaGraphMixin:
         context.q_seqlens = input_buffers['q_seqlens']
         context.kv_seqlens = input_buffers['kv_seqlens']
         context.q_start_loc = input_buffers['q_start_loc']
+
+    def get_outputs_cudagraph(self, graph_meta: CudaGraphMeta, input_ids: Tensor, **kwargs):
+        """Get outputs from buffers."""
+        num_tokens = input_ids.size(-1)
+        outputs = dict()
+        outputs['hidden_states'] = graph_meta.output_buffers['hidden_states'][:, :num_tokens]
+        return outputs
