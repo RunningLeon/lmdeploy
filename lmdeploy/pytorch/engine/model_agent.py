@@ -333,6 +333,7 @@ class SpecModelAgent:
         self.method = specdecode_config.method
         self.model_config = specdecode_config.model_config
         self.cache_config = specdecode_config.cache_config
+        self.num_spec_tokens = specdecode_config.num_speculative_tokens
         self.backend_config = backend_config
         self.device = device
 
@@ -365,12 +366,17 @@ class SpecModelAgent:
     def build_cache_engine(self, cache_stream: torch.cuda.Stream):
         """Build cache engine."""
         if self.cache_config is not None:
-            self.cache_engine = CacheEngine(self.cache_config, self.model_config, rank=0, tp_rank=0, world_size=1, cache_stream=cache_stream)
+            self.cache_engine = CacheEngine(self.cache_config,
+                                            self.model_config,
+                                            rank=0,
+                                            tp_rank=0,
+                                            world_size=1,
+                                            cache_stream=cache_stream)
 
     def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
         """Forward impl."""
         cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
-        output = self.proposer.propose(inputs, cache_engine=self.cache_engine, stream=self.stream)
+        output = self.proposer._forward(inputs, cache_engine=self.cache_engine, stream=self.stream)
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
@@ -385,32 +391,122 @@ class SpecModelAgent:
         await asyncio.sleep(0)
         return output
 
+    async def _async_model_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+        """Model forward.
+
+        Args:
+            inputs (Dict): The input data comes from _make_inputs.
+            swap_in_map (SwapMap): Cache maps to swap in.
+            swap_out_map (SwapMap): Cache maps to swap out.
+        """
+        max_prefill_token_num = self.cache_config.max_prefill_token_num
+        swap_done = False
+
+        async def __forward(inputs):
+            """forward."""
+            nonlocal swap_done, swap_in_map, swap_out_map
+            if swap_done:
+                return await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict())
+            else:
+                swap_done = True
+                return await self.async_forward(inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+
+        async def __long_context_single_forward(new_inputs):
+            """One large sequence."""
+            model_metas = new_inputs[0].model_metas
+            for inp in new_inputs:
+                inp.model_metas = model_metas
+                output = await __forward(inp)
+                model_metas = output.get('model_metas')
+            return output
+
+        # make long context inputs
+        is_long_context = inputs.input_ids.numel() > max_prefill_token_num and not inputs.is_decoding
+
+        if is_long_context:
+            seq_len = inputs.seq_length
+            batch_size = seq_len.size(0)
+            assert batch_size == 1, 'Do not support batched long context.'
+            inputs_li = inputs.split(max_prefill_token_num)
+            outputs = await __long_context_single_forward(inputs_li)
+        else:
+            outputs = await __forward(inputs)
+
+        loop_count = self.num_spec_tokens - 1
+        draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs)
+        draft_tokens_li = [draft_token_ids]
+        if loop_count > 0:
+            inputs = self.proposer.update_inputs_decoding(inputs, draft_token_ids.transpose(0, 1), target_hidden_states,
+                                                          model_metas)
+            for loop_idx in range(loop_count):
+                outputs = await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict())
+                draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs)
+                draft_tokens_li.append(draft_token_ids)
+                if loop_idx < loop_count - 1:
+                    inputs.update(draft_token_ids.transpose(0, 1))
+                    inputs.model_metas = model_metas
+                    inputs.target_hidden_states = target_hidden_states
+                    if inputs.target_position_ids is not None:
+                        inputs.target_position_ids += 1
+
+        return torch.cat(draft_tokens_li, dim=-1)
+
     async def async_model_forward(self,
                                   model_inputs: ModelInputs,
                                   spec_inputs: SpecDecodeInputs,
                                   swap_in_map: SwapMap = dict(),
                                   swap_out_map: SwapMap = dict()):
         """Draft model forward."""
-        if model_inputs.spec_metadata.draft_token_ids is not None:
-            spec_metadata = model_inputs.spec_metadata
-            output_token_ids, num_rejected_tokens, last_token_ids = self.rejection_sampler(
-                spec_inputs.target_logits, spec_metadata.draft_token_ids, spec_inputs.bonus_token_ids,
-                spec_metadata.num_draft_tokens, spec_metadata.max_spec_len)
-            spec_inputs.num_rejected_tokens = num_rejected_tokens
-            spec_inputs.reject_sample_tokens = output_token_ids
-            spec_inputs.next_token_ids = last_token_ids
-        else:
-            spec_inputs.next_token_ids = spec_inputs.bonus_token_ids
-            output_token_ids = spec_inputs.next_token_ids.unsqueeze(-1)
+        with torch.cuda.stream(self.stream):
+            if model_inputs.spec_metadata.draft_token_ids is not None:
+                spec_metadata = model_inputs.spec_metadata
+                output_token_ids, num_rejected_tokens, last_token_ids = self.rejection_sampler(
+                    spec_inputs.target_logits, spec_metadata.draft_token_ids, spec_inputs.bonus_token_ids,
+                    spec_metadata.num_draft_tokens, spec_metadata.max_spec_len)
+                spec_inputs.num_rejected_tokens = num_rejected_tokens
+                spec_inputs.reject_sample_tokens = output_token_ids
+                spec_inputs.next_token_ids = last_token_ids
+            else:
+                spec_inputs.next_token_ids = spec_inputs.bonus_token_ids
+                output_token_ids = spec_inputs.next_token_ids.unsqueeze(-1)
 
-        with record_function('draft_prepare_inputs'):
-            draft_model_inputs = self.proposer.prepare_inputs(model_inputs, spec_inputs)
+            with record_function('draft_prepare_inputs'):
+                draft_model_inputs = self.proposer.prepare_inputs(model_inputs, spec_inputs)
 
-        new_draft_tokens = await self.async_forward(draft_model_inputs,
-                                                    swap_in_map=swap_in_map,
-                                                    swap_out_map=swap_out_map)
-        outputs = dict(output_token_ids=output_token_ids, spec_token_ids=new_draft_tokens)
-        return outputs
+            new_draft_tokens = await self._async_model_forward(draft_model_inputs,
+                                                               swap_in_map=swap_in_map,
+                                                               swap_out_map=swap_out_map)
+            outputs = dict(output_token_ids=output_token_ids, spec_token_ids=new_draft_tokens)
+            return outputs
+
+    def warmup(self, max_batches: int, target_model_config: ModelConfig):
+        """warmup."""
+        target_hidden_size = self.proposer.get_target_hidden_size(target_model_config)
+
+        # warmup prefill
+        inputs = ModelInputs.make_dummy(max_batches,
+                                        is_decoding=False,
+                                        device='cuda',
+                                        vocab_size=self.model_config.vocab_size)
+        inputs.target_hidden_states = torch.randn((1, max_batches, target_hidden_size),
+                                                  dtype=self.model_config.dtype,
+                                                  device='cuda')
+        self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
+
+        capture_batch_sizes = self.proposer.model.get_capture_batch_sizes()
+        capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
+
+        for batch_size in capture_batch_sizes:
+            inputs = ModelInputs.make_dummy(
+                batch_size,
+                is_decoding=True,
+                device='cuda',
+                vocab_size=self.model_config.vocab_size,
+            )
+            inputs.target_hidden_states = torch.randn((1, batch_size, self.model_config.hidden_size),
+                                                      dtype=self.model_config.dtype,
+                                                      device='cuda')
+            self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
 
 
 class BaseModelAgent:
@@ -525,8 +621,9 @@ class BaseModelAgent:
     def warmup(self):
         """warmup."""
         # TODO: disable for now, do not remove the comments.
-        with self.all_context():
+        with self.all_context(), torch.cuda.stream(self.stream), torch.inference_mode():
             max_batches = self.cache_config.max_batches
+
             num_tokens = max_batches
 
             # warmup prefill
@@ -545,6 +642,10 @@ class BaseModelAgent:
                                                 device='cuda',
                                                 vocab_size=self.model_config.vocab_size)
                 self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
+
+            # warmup draft model
+            if self.spec_agent is not None:
+                self.spec_agent.warmup(max_batches, self.model_config)
 
     async def _async_model_forward(
         self,
@@ -639,8 +740,8 @@ class BaseModelAgent:
             return tmp_out
 
         # make long context inputs
-        is_long_context = inputs.input_ids.numel(
-        ) > max_prefill_token_num and not inputs.is_decoding and inputs.seq_length[0] == 1
+        is_long_context = inputs.input_ids.numel() > max_prefill_token_num and not inputs.is_decoding
+
         max_seqlen = 0
         if is_long_context:
             seq_len = inputs.seq_length
@@ -1165,7 +1266,7 @@ class BaseModelAgent:
                                inputs,
                                self.cache_engine,
                                stream=self.stream,
-                               output_position_ids=self.spec_agent is not None)
+                               output_position_ids=False)
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
@@ -1193,6 +1294,10 @@ class BaseModelAgent:
         """Reset graph runner to prevent tp hanging."""
         if hasattr(self.patched_model, 'reset'):
             self.patched_model.reset()
+
+        if self.spec_agent is not None:
+            if self.spec_agent.proposer.model is not None and hasattr(self.spec_agent.proposer.model, 'reset'):
+                self.spec_agent.proposer.model.reset()
 
     @torch.inference_mode()
     def update_params(self, request: UpdateParamsRequest):

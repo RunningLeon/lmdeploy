@@ -274,22 +274,26 @@ class ModelInputs:
             max_q_seqlen = end - start
             if isinstance(max_q_seqlen, torch.Tensor):
                 max_q_seqlen = max_q_seqlen.item()
-            inp = ModelInputs(
-                input_ids=self.input_ids[:, start:end],
-                seq_length=input_ids.new_tensor([end - start]),
-                block_offsets=self.block_offsets,
-                history_lengths=self.history_lengths + start,
-                is_decoding=self.is_decoding,
-                num_ignored_history=self.num_ignored_history,
-                max_q_seqlen=max_q_seqlen,
-                max_kv_seqlen=max_kv_seqlen,
-                sum_kv_seqlen=max_kv_seqlen,
-                local_adapter_ids=self.local_adapter_ids,
-                vision_inputs=vision_inputs,
-                model_metas=self.model_metas,
-                cross_length=cross_length,
-                history_cross_length=history_cross_length,
-            )
+            target_hidden_states = self.target_hidden_states[:, start:
+                                                             end] if self.target_hidden_states is not None else None
+            target_position_ids = self.target_position_ids[:,
+                                                           start:end] if self.target_position_ids is not None else None
+            inp = ModelInputs(input_ids=self.input_ids[:, start:end],
+                              seq_length=input_ids.new_tensor([end - start]),
+                              block_offsets=self.block_offsets,
+                              history_lengths=self.history_lengths + start,
+                              is_decoding=self.is_decoding,
+                              num_ignored_history=self.num_ignored_history,
+                              max_q_seqlen=max_q_seqlen,
+                              max_kv_seqlen=max_kv_seqlen,
+                              sum_kv_seqlen=max_kv_seqlen,
+                              local_adapter_ids=self.local_adapter_ids,
+                              vision_inputs=vision_inputs,
+                              model_metas=self.model_metas,
+                              cross_length=cross_length,
+                              history_cross_length=history_cross_length,
+                              target_hidden_states=target_hidden_states,
+                              target_position_ids=target_position_ids)
             ret.append(inp)
             history_cross_length = cross_length
             max_kv_seqlen += max_q_seqlen

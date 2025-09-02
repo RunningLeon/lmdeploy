@@ -1,8 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from mmengine import Registry
+from torch.profiler import record_function
 
 from lmdeploy.utils import get_logger
 
@@ -79,12 +80,22 @@ class BaseSpecProposer:
         self.model = patched_model
         self.target_model = target_model
 
-    def propose(self, model_inputs: ModelInputs, cache_engine: CacheEngine = None, stream: torch.cuda.Stream = None):
+    def get_outputs(self, model_outputs: Dict[str, torch.Tensor], model_inputs: ModelInputs):
+        """Get outputs."""
         raise NotImplementedError()
 
     def prepare_inputs(self, model_inputs: ModelInputs, spec_inputs: SpecDecodeInputs):
         """Prepare inputs."""
         raise NotImplementedError()
+
+    @record_function('draft_model_forward')
+    def _forward(self, model_inputs: ModelInputs, cache_engine: CacheEngine = None, stream: torch.cuda.Stream = None):
+        """Forward."""
+        return draft_model_forward(self.model,
+                                   model_inputs,
+                                   model_config=self.specdecode_config.model_config,
+                                   cache_engine=cache_engine,
+                                   stream=stream)
 
     def update_inputs_decoding(self, model_inputs: ModelInputs, input_ids: torch.Tensor,
                                target_hidden_states: torch.Tensor, model_metas: List[Any]):
@@ -102,6 +113,7 @@ class BaseSpecProposer:
         model_inputs.target_hidden_states = target_hidden_states
         return model_inputs
 
+    @record_function('draft_get_logits')
     def get_logits(self, hidden_states: torch.Tensor):
         """Get logits of model output."""
         draft_model = self.model
@@ -113,6 +125,10 @@ class BaseSpecProposer:
         else:
             logits = self.target_model.get_logits(hidden_states)
         return logits
+
+    def get_target_hidden_size(self, model_config: ModelConfig):
+        """Get target hidden size."""
+        return model_config.hidden_size
 
 
 def build_specdecode_proposer(specdecode_config: SpecDecodeConfig, device: str = 'cuda'):

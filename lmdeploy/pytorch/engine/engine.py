@@ -910,7 +910,7 @@ class Engine(EngineBase):
 
     def _make_spec_stats(self, seqs: SeqList, next_token_ids: torch.LongTensor):
         """Make spec stats."""
-        debug = True
+        debug = False
         all_stats = [None] * len(seqs)
         if self.speculative_config is not None and (debug or self.engine_config.enable_metrics):
             if debug and not hasattr(self, 'spec_stats'):

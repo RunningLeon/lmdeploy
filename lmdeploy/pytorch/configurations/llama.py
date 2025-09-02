@@ -19,6 +19,7 @@ class LlamaModelConfigBuilder(AutoModelConfigBuilder):
             # update draft model arch
             assert speculative_config is not None
             hf_config.architectures[0] = speculative_config.method.capitalize() + hf_config.architectures[0]
+            cfg.vocab_size = getattr(hf_config, 'draft_vocab_size', hf_config.vocab_size)
         elif speculative_config is not None:
             # add aux_hidden_state_layers for eagle3
             if speculative_config.method == 'eagle3':
