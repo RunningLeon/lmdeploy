@@ -36,6 +36,7 @@ class Attention(nn.Module):
         logit_softcapping: float = None,
         causal: bool = True,
         use_flash_mla: bool = False,
+        use_flash_attn3: bool = False,
         learnable_sink: bool = False,
         **kwargs,
     ):
@@ -60,6 +61,7 @@ class Attention(nn.Module):
             logit_softcapping=logit_softcapping,
             causal=causal,
             use_flash_mla=use_flash_mla,
+            use_flash_attn3=use_flash_attn3,
             learnable_sink=learnable_sink,
             **kwargs,
         )

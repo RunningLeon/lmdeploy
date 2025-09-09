@@ -201,6 +201,7 @@ class ModelConfig:
     cogvlm_style: bool = False
     custom_module_map: Dict[str, setattr] = None
     use_flash_mla: bool = False
+    use_flash_attn3: bool = False
 
     def get_head_size(self):
         """Get head size."""

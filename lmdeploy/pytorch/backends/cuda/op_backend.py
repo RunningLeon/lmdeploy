@@ -130,9 +130,16 @@ class CudaOpsBackend(DefaultOpsBackend):
         kv_seqlens = step_context.kv_seqlens
         kv_start_loc = None
         kv_flatten_size = None
-        cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(q_seqlens, dim=0, dtype=torch.int32), (1, 0))
-        cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(kv_seqlens, dim=0, dtype=torch.int32), (1, 0))
-        if not step_context.is_decoding:
+        use_flash_mla = getattr(step_context.model_config, 'use_flash_mla', False)
+        use_flash_attn3 = getattr(step_context.model_config, 'use_flash_attn3', False)
+        cu_seqlens_q = None
+        cu_seqlens_k = None
+        if use_flash_mla or use_flash_attn3:
+            cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(q_seqlens, dim=0, dtype=torch.int32), (1, 0))
+            cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(kv_seqlens, dim=0, dtype=torch.int32), (1, 0))
+            step_context.block_offsets = step_context.block_offsets.to(torch.int32)
+
+        if (not step_context.is_decoding) and not use_flash_attn3:
             kv_start_loc = kv_seqlens.cumsum(0) - kv_seqlens
             kv_flatten_size = step_context.sum_kv_seqlen
         attn_metadata = attn_meta_cls(
@@ -147,7 +154,7 @@ class CudaOpsBackend(DefaultOpsBackend):
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
         )
-        if getattr(step_context.model_config, 'use_flash_mla', False) is True:
+        if use_flash_mla:
             if step_context.is_decoding is True:
                 cls.update_meta_flashmla(attn_metadata, step_context.model_config.num_attention_heads)
 

@@ -1262,11 +1262,13 @@ class BaseModelAgent:
 
     def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
         cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
-        output = model_forward(self.patched_model,
-                               inputs,
-                               self.cache_engine,
-                               stream=self.stream,
-                               output_position_ids=False)
+        output = model_forward(
+            self.patched_model,
+            inputs,
+            self.cache_engine,
+            stream=self.stream,
+            output_position_ids=self.spec_agent is not None,
+        )
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):

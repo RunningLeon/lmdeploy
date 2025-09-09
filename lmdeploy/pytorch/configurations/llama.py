@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .builder import AutoModelConfigBuilder
 from .default import DefaultModelConfigBuilder
+from .utils import flash_attn_v3_available
 
 
 class LlamaModelConfigBuilder(AutoModelConfigBuilder):
@@ -26,5 +27,6 @@ class LlamaModelConfigBuilder(AutoModelConfigBuilder):
                 num_layers = cfg.num_layers
                 hf_config.aux_hidden_state_layers = (2, num_layers // 2, num_layers - 3)
         cfg.hf_config = hf_config
-
+        cfg.use_flash_attn3 = flash_attn_v3_available()
+        cfg.hf_config.use_flash_attn3 = cfg.use_flash_attn3
         return cfg

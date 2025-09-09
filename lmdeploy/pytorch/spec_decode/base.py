@@ -13,7 +13,7 @@ from ..model_inputs import ModelInputs, SpecDecodeInputs, step_ctx_manager
 from ..models.patch import build_patched_model, update_custom_module_map
 from ..weight_loader.model_weight_loader import load_model_weights
 
-SPEC_PROPOSERS = Registry('vision_model')
+SPEC_PROPOSERS = Registry('spec_proposers')
 
 logger = get_logger('lmdeploy')
 

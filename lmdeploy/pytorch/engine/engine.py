@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from torch.profiler import record_function
 
 from lmdeploy.messages import PytorchEngineConfig, RequestMetrics, ResponseType, SpeculativeConfig
 from lmdeploy.pytorch.disagg.config import EngineRole
@@ -747,6 +748,7 @@ class Engine(EngineBase):
 
     @torch.inference_mode()
     @logging_timer('create_spec_inputs', logger)
+    @record_function('create_spec_inputs')
     def _create_spec_inputs(self, messages: SeqList, token_ids: List[List[int]]):
         """Create spec inputs from messages."""
 
@@ -782,6 +784,7 @@ class Engine(EngineBase):
 
     @torch.inference_mode()
     @logging_timer('CreateModelInputs', logger)
+    @record_function('CreateModelInputs')
     def create_model_inputs(self, messages: SeqList, is_prefill: bool):
         """Create model inputs from messages.
 
@@ -933,6 +936,7 @@ class Engine(EngineBase):
 
         return all_stats
 
+    @record_function('make_infer_outputs')
     def _make_infer_outputs(
         self,
         batched_outputs: BatchedOutputs,
