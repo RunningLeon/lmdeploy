@@ -80,7 +80,10 @@ class BaseSpecProposer:
         self.model = patched_model
         self.target_model = target_model
 
-    def get_outputs(self, model_outputs: Dict[str, torch.Tensor], model_inputs: ModelInputs):
+    def get_outputs(self,
+                    model_outputs: Dict[str, torch.Tensor],
+                    model_inputs: ModelInputs,
+                    spec_inputs: SpecDecodeInputs = None):
         """Get outputs."""
         raise NotImplementedError()
 
@@ -97,20 +100,24 @@ class BaseSpecProposer:
                                    cache_engine=cache_engine,
                                    stream=stream)
 
-    def update_inputs_decoding(self, model_inputs: ModelInputs, input_ids: torch.Tensor,
-                               target_hidden_states: torch.Tensor, model_metas: List[Any]):
+    def update_inputs_decoding(self, model_inputs: ModelInputs, spec_inputs: SpecDecodeInputs,
+                               next_input_ids: torch.Tensor, target_hidden_states: torch.Tensor,
+                               model_metas: List[Any]):
         """Update to decoding inputs."""
         model_inputs.is_decoding = True
         batch_size = model_inputs.seq_length.size(0)
-        model_inputs.input_ids = input_ids
+        model_inputs.input_ids = next_input_ids
         model_inputs.max_q_seqlen = 1
         model_inputs.max_kv_seqlen += 1
         model_inputs.sum_kv_seqlen += model_inputs.seq_length.numel()
         model_inputs.history_lengths += model_inputs.seq_length
+        if spec_inputs.num_rejected_tokens is not None:
+            model_inputs.history_lengths -= spec_inputs.num_rejected_tokens
         model_inputs.seq_length = model_inputs.seq_length.new_ones(batch_size)
         model_inputs.target_position_ids = model_inputs.history_lengths.unsqueeze(0).clone()
         model_inputs.model_metas = model_metas
         model_inputs.target_hidden_states = target_hidden_states
+        model_inputs.spec_metadata = None
         return model_inputs
 
     @record_function('draft_get_logits')

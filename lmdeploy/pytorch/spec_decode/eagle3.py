@@ -6,7 +6,7 @@ import torch
 from lmdeploy.utils import get_logger
 
 from ..config import ModelConfig
-from ..model_inputs import ModelInputs
+from ..model_inputs import ModelInputs, SpecDecodeInputs
 from .base import SPEC_PROPOSERS
 from .deepseek_mtp import DeepseekMTP
 
@@ -30,27 +30,26 @@ class Eagle3(DeepseekMTP):
         hidden_size = getattr(hf_config, 'target_hidden_size', hf_config.hidden_size)
         return hidden_size * 3
 
-    def get_outputs(self, model_outputs: Dict[str, torch.Tensor], model_inputs: ModelInputs):
+    def get_outputs(self,
+                    model_outputs: Dict[str, torch.Tensor],
+                    model_inputs: ModelInputs,
+                    spec_inputs: SpecDecodeInputs = None):
         """Get outputs."""
         hidden_states = model_outputs['hidden_states']
         hidden_states_prenorm = model_outputs['hidden_states_prenorm']
         model_metas = model_outputs['model_metas']
         if not model_inputs.is_decoding:
-            if model_inputs.seq_length.size(0) == 1:
+            assert spec_inputs is not None, 'spec_inputs should be provided for prefill mode'
+            if model_inputs.seq_length.size(0) == 1 and spec_inputs.num_rejected_tokens is None:
                 hidden_states = hidden_states[:, -1:]
                 hidden_states_prenorm = hidden_states_prenorm[:, -1:]
             else:
-                last_token_loc = model_inputs.seq_length.cumsum(0) - 1
+                last_token_loc = spec_inputs.last_token_indices
                 hidden_states = hidden_states[:, last_token_loc]
                 hidden_states_prenorm = hidden_states_prenorm[:, last_token_loc]
 
         logits = self.get_logits(hidden_states)[0]
         draft_token_ids = logits.argmax(dim=-1, keepdim=True)
-        device = draft_token_ids.device
-        dtype = draft_token_ids.dtype
         # token mapping
-        if self.draft_id_to_target_id.device != device or self.draft_id_to_target_id.dtype != dtype:
-            self.draft_id_to_target_id = self.draft_id_to_target_id.to(dtype=draft_token_ids.dtype,
-                                                                       device=draft_token_ids.device)
         draft_token_ids = self.draft_id_to_target_id[draft_token_ids]
         return draft_token_ids, model_metas, hidden_states_prenorm

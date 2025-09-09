@@ -132,6 +132,7 @@ class SpecDecodeInputs:
     next_token_ids: torch.LongTensor = None
     num_rejected_tokens: torch.LongTensor = None
     reject_sample_tokens: torch.LongTensor = None
+    last_token_indices: torch.LongTensor = None
 
 
 @dataclass

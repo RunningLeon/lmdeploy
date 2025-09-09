@@ -391,7 +391,8 @@ class SpecModelAgent:
         await asyncio.sleep(0)
         return output
 
-    async def _async_model_forward(self, inputs: ModelInputs, swap_in_map: SwapMap, swap_out_map: SwapMap):
+    async def _async_model_forward(self, inputs: ModelInputs, spec_inputs: SpecDecodeInputs, swap_in_map: SwapMap,
+                                   swap_out_map: SwapMap):
         """Model forward.
 
         Args:
@@ -433,11 +434,11 @@ class SpecModelAgent:
             outputs = await __forward(inputs)
 
         loop_count = self.num_spec_tokens - 1
-        draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs)
+        draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs, spec_inputs)
         draft_tokens_li = [draft_token_ids]
         if loop_count > 0:
-            inputs = self.proposer.update_inputs_decoding(inputs, draft_token_ids.transpose(0, 1), target_hidden_states,
-                                                          model_metas)
+            inputs = self.proposer.update_inputs_decoding(inputs, spec_inputs, draft_token_ids.transpose(0, 1),
+                                                          target_hidden_states, model_metas)
             for loop_idx in range(loop_count):
                 outputs = await self.async_forward(inputs, swap_in_map=dict(), swap_out_map=dict())
                 draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs)
@@ -466,14 +467,17 @@ class SpecModelAgent:
                 spec_inputs.num_rejected_tokens = num_rejected_tokens
                 spec_inputs.reject_sample_tokens = output_token_ids
                 spec_inputs.next_token_ids = last_token_ids
+                spec_inputs.last_token_indices = model_inputs.seq_length.cumsum(0) - 1 - num_rejected_tokens
             else:
                 spec_inputs.next_token_ids = spec_inputs.bonus_token_ids
                 output_token_ids = spec_inputs.next_token_ids.unsqueeze(-1)
+                spec_inputs.last_token_indices = model_inputs.seq_length.cumsum(0) - 1
 
             with record_function('draft_prepare_inputs'):
                 draft_model_inputs = self.proposer.prepare_inputs(model_inputs, spec_inputs)
 
             new_draft_tokens = await self._async_model_forward(draft_model_inputs,
+                                                               spec_inputs,
                                                                swap_in_map=swap_in_map,
                                                                swap_out_map=swap_out_map)
             outputs = dict(output_token_ids=output_token_ids, spec_token_ids=new_draft_tokens)
