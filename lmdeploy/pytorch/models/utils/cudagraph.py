@@ -65,7 +65,11 @@ class CudaGraphMixin:
                                                    device=device)
         input_buffers['position_ids'] = torch.zeros((1, max_tokens), dtype=torch.int64, device=device)
         seqlens_dtype = torch.int64
-        if getattr(self.config, 'use_flash_mla', False) is True:
+        use_flash_mla = getattr(self.config, 'use_flash_mla', False)
+        use_flash_attn3 = getattr(self.config, 'use_flash_attn3', False)
+        if use_flash_attn3 and not graph_meta.is_decoding:
+            seqlens_dtype = torch.int32
+        if use_flash_mla is True:
             import flash_mla
             if graph_meta.is_decoding:
                 seqlens_dtype = torch.int32
