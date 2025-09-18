@@ -139,29 +139,6 @@ class SpecDecodeInputs:
 
 
 @dataclass
-class SpecMetaData:
-    draft_token_ids: torch.Tensor = None
-    num_draft_tokens: torch.Tensor = None
-    target_logits_indices: torch.Tensor = None
-    bonus_logits_indices: torch.Tensor = None
-    logits_indices: torch.Tensor = None
-    max_spec_len: int = 1
-
-    @torch.inference_mode()
-    def to_device(self, device: str, non_blocking: bool = False):
-        """To device."""
-        out_dict = dict()
-        for f in fields(self):
-            k = f.name
-            v = getattr(self, k)
-            if isinstance(v, torch.Tensor):
-                v = v.to(device, non_blocking=non_blocking)
-            out_dict[k] = v
-
-        return SpecMetaData(**out_dict)
-
-
-@dataclass
 class ModelInputs:
     """Input of the model."""
     input_ids: torch.LongTensor
@@ -180,7 +157,6 @@ class ModelInputs:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: 'DPMeta' = None
     enable_microbatch: bool = False
-    spec_metadata: SpecMetaData = None
     target_hidden_states: torch.Tensor = None
     target_position_ids: torch.Tensor = None
 
@@ -318,8 +294,6 @@ class ModelInputs:
             if isinstance(v, torch.Tensor):
                 v = v.to(device, non_blocking=non_blocking)
             elif isinstance(v, VisionModelInputs):
-                v = v.to_device(device, non_blocking=non_blocking)
-            elif isinstance(v, SpecMetaData):
                 v = v.to_device(device, non_blocking=non_blocking)
             out_dict[k] = v
 
@@ -467,7 +441,7 @@ class StepContext:
             ranges = torch.arange(0, max_q_seqlen, device=device)
             position_ids = history_seqlens[:, None] + ranges[None, :]
             position_ids = position_ids.flatten()
-            return attention_mask, position_ids
+            return attention_mask, position_ids[None]
 
         # get mask
         mask_range = torch.arange(max_q_seqlen, device=device)[None, :]

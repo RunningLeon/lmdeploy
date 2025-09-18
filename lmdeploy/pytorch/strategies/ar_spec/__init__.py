@@ -26,7 +26,7 @@ class ARSpecStrategyFactory(StrategyFactoryBase):
     def build_cudagraph_strategy(self) -> 'CudagraphStrategy':
         """Build cudagraph strategy."""
         from .cudagraph import ARSpecCudagraphStrategy
-        return ARSpecCudagraphStrategy()
+        return ARSpecCudagraphStrategy(self.specdecode_config.num_speculative_tokens)
 
     def build_sampling_strategy(self) -> 'SamplingStrategy':
         """Build sampling strategy."""
@@ -38,7 +38,7 @@ class ARSpecStrategyFactory(StrategyFactoryBase):
     def build_model_inputs_strategy(self) -> 'ModelInputsStrategy':
         """Build model inputs strategy."""
         from .model_inputs import ARSpecModelInputsStrategy
-        return ARSpecModelInputsStrategy()
+        return ARSpecModelInputsStrategy(self.specdecode_config.num_speculative_tokens)
 
     def build_model_agent_strategy(self) -> 'ModelAgentStrategy':
         """Build model agent strategy."""
@@ -49,10 +49,10 @@ class ARSpecStrategyFactory(StrategyFactoryBase):
                               scheduler_config: 'SchedulerConfig') -> 'EngineStrategy':
         """Build engine strategy."""
         from .engine import ARSpecEngineStrategy
-        return ARSpecEngineStrategy(cache_config=cache_config, 
-                                    scheduler_config=scheduler_config, 
+        return ARSpecEngineStrategy(cache_config=cache_config,
+                                    scheduler_config=scheduler_config,
                                     num_spec_tokens=self.specdecode_config.num_speculative_tokens)
 
     def build_sequence_strategy(self) -> SequenceStrategy:
         from .sequence import ARSpecSequenceStrategy
-        return ARSpecSequenceStrategy(self.specdecode_config.num_speculative_tokens, self.pad_token_id)
+        return ARSpecSequenceStrategy()

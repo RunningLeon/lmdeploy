@@ -22,7 +22,7 @@ from lmdeploy.utils import get_logger, get_max_batch_size, get_model, logging_ti
 from ..adapter.adapter import AdapterManager
 from ..config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig, SchedulerConfig
 from ..messages import MessageStatus, SchedulerSequence, UpdateTokenMode
-from ..model_inputs import ModelInputs, VisionModelInputs, SpecMetaData
+from ..model_inputs import ModelInputs, VisionModelInputs
 from ..paging import Scheduler
 from ..strategies import build_strategy_factory
 from .base import EngineBase
@@ -413,7 +413,10 @@ class Engine(EngineBase):
         cache_config = self.executor.cache_config
         self.adapter_manager = self._build_adapter_manager(adapters)
         self.seq_meta = _build_seq_meta(cache_config, strategy=self.seq_strategy)
-        self.scheduler = Scheduler(scheduler_config, cache_config, seq_meta=self.seq_meta, num_spec_tokens=num_spec_tokens)
+        self.scheduler = Scheduler(scheduler_config,
+                                   cache_config,
+                                   seq_meta=self.seq_meta,
+                                   num_spec_tokens=num_spec_tokens)
 
         # engine args
         self.model_path = model_path
@@ -756,42 +759,6 @@ class Engine(EngineBase):
         return vision_embedding_inputs
 
     @torch.inference_mode()
-    @logging_timer('create_spec_inputs', logger)
-    @record_function('create_spec_inputs')
-    def _create_spec_inputs(self, messages: SeqList, token_ids: List[List[int]]):
-        """Create spec inputs from messages."""
-
-        spec_metadata: SpecMetaData = SpecMetaData()
-        spec_tokens = [msg.spec_token_ids for msg in messages]
-        num_spec_tokens = [len(tks) for tks in spec_tokens]
-        has_spec = any([n > 0 for n in num_spec_tokens])
-        if has_spec:
-            num_tokens = [len(tks) for tks in token_ids]
-            token_ids = [np.concatenate([tks, spec_tks]) for tks, spec_tks in zip(token_ids, spec_tokens)]
-            cu_num_tokens = 0
-            cu_logit_nums = 0
-            logits_indices = []
-            target_logits_indices = []
-            bonus_logits_indices = []
-            for cur_num_tks, cur_spec_tks in zip(num_tokens, num_spec_tokens):
-                cur_num = cur_num_tks + cur_spec_tks
-                logits_indices += [cu_num_tokens + i for i in range(cur_num - cur_spec_tks - 1, cur_num)]
-                target_logits_indices += [cu_logit_nums + i for i in range(cur_spec_tks)]
-                bonus_logits_indices.append(cu_logit_nums + cur_spec_tks)
-                cu_num_tokens += cur_num
-                cu_logit_nums += cur_spec_tks + 1
-
-            spec_metadata = SpecMetaData(
-                draft_token_ids=torch.as_tensor(np.concatenate(spec_tokens), dtype=torch.long),
-                num_draft_tokens=torch.as_tensor(num_spec_tokens, dtype=torch.long),
-                target_logits_indices=torch.as_tensor(target_logits_indices, dtype=torch.long),
-                bonus_logits_indices=torch.as_tensor(bonus_logits_indices, dtype=torch.long),
-                logits_indices=torch.as_tensor(logits_indices, dtype=torch.long),
-                max_spec_len=max(num_spec_tokens),
-            )
-        return spec_metadata, token_ids
-
-    @torch.inference_mode()
     @logging_timer('CreateModelInputs', logger)
     @record_function('CreateModelInputs')
     def create_model_inputs(self, messages: SeqList, is_prefill: bool):
@@ -805,13 +772,9 @@ class Engine(EngineBase):
         history_lengths = torch.tensor([msg.num_history_ids for msg in messages])
 
         # input ids
-        token_ids = [msg.token_ids for msg in messages]
+        token_ids = [np.concatenate([msg.token_ids, msg.draft_token_ids]) for msg in messages]
 
         # spec decode
-        spec_metadata = None
-        if self.speculative_config is not None:
-            spec_metadata, token_ids = self._create_spec_inputs(messages, token_ids)
-            is_prefill = True
 
         input_ids = torch.as_tensor(np.concatenate(token_ids))[None]
 
@@ -850,7 +813,6 @@ class Engine(EngineBase):
             max_kv_seqlen=max_kv_seqlen,
             sum_kv_seqlen=sum_kv_seqlen,
             model_metas=model_metas,
-            spec_metadata=spec_metadata,
         )
 
         # adapters
@@ -926,9 +888,9 @@ class Engine(EngineBase):
         new_token_timestamp = batched_outputs.new_token_timestamp
         logits = batched_outputs.logits
         logprobs = batched_outputs.logprobs
-        spec_token_ids = batched_outputs.spec_token_ids
 
         # should call before update running
+        # TODO
         # specdecode_stats = self._make_spec_stats(running, next_token_ids)
 
         seq_length = [seq.num_token_ids for seq in running]

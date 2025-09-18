@@ -26,6 +26,7 @@ class DeepseekV2ModelConfigBuilder(AutoModelConfigBuilder):
         num_key_value_heads = cls.update_num_kv_heads(hf_config, tp, num_key_value_heads)
         hf_config.use_flash_mla = flash_mla_available()
         num_layers = hf_config.num_hidden_layers
+        model_paradigm = 'ar'
 
         # draft model cfg
         if is_draft_model and speculative_config is not None:
@@ -35,14 +36,20 @@ class DeepseekV2ModelConfigBuilder(AutoModelConfigBuilder):
             # remove for correct mapping when building the patched model
             del hf_config.auto_map
 
-        return ModelConfig(hidden_size=hf_config.hidden_size,
-                           num_layers=num_layers,
-                           num_attention_heads=num_attention_heads,
-                           num_key_value_heads=num_key_value_heads,
-                           bos_token_id=hf_config.bos_token_id,
-                           eos_token_id=hf_config.eos_token_id,
-                           head_dim=head_dim,
-                           k_head_dim=k_head_dim,
-                           v_head_dim=v_head_dim,
-                           vocab_size=hf_config.vocab_size,
-                           use_flash_mla=hf_config.use_flash_mla)
+        if is_draft_model or speculative_config is not None:
+            model_paradigm = 'ar_spec'
+
+        return ModelConfig(
+            hidden_size=hf_config.hidden_size,
+            num_layers=num_layers,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            bos_token_id=hf_config.bos_token_id,
+            eos_token_id=hf_config.eos_token_id,
+            head_dim=head_dim,
+            k_head_dim=k_head_dim,
+            v_head_dim=v_head_dim,
+            vocab_size=hf_config.vocab_size,
+            use_flash_mla=hf_config.use_flash_mla,
+            model_paradigm=model_paradigm,
+        )

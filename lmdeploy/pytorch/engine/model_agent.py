@@ -25,9 +25,9 @@ from ..devices import DeviceContext, get_device_manager
 from ..distributed import DistContext, get_dist_manager
 from ..model_inputs import ModelInputs, SpecDecodeInputs, step_ctx_manager
 from ..models.patch import BuildModelContext, add_adapters, build_patched_model, update_custom_module_map
+from ..spec_decode import build_specdecode_proposer
 from ..strategies import build_strategy_factory
 from ..strategies.base.model_agent import ExtraInputs, ExtraOutputs, StoppingCriteria
-from ..spec_decode import build_specdecode_proposer
 from ..utils import get_gpu_memory
 from ..weight_loader.model_weight_loader import load_model_weights
 from .cache_engine import CacheEngine
@@ -300,6 +300,7 @@ class SpecModelAgent:
         specdecode_config: SpecDecodeConfig,
         backend_config: BackendConfig,
         stream: torch.Stream,
+        inputs_strategy,
         device: str = 'cuda',
     ):
         from ..spec_decode import RejectionSampler
@@ -313,6 +314,7 @@ class SpecModelAgent:
         self.proposer = build_specdecode_proposer(specdecode_config, device=device)
         self.cache_engine = None
         self.rejection_sampler = RejectionSampler()
+        self.inputs_strategy = inputs_strategy
         self.stream = stream
 
     def set_cache_config(self, cache_config: CacheConfig):
@@ -323,9 +325,12 @@ class SpecModelAgent:
         """Set model config."""
         self.model_config = model_config
 
-    def build_model(self, empty_init: bool, target_model=None):
+    def build_model(self, empty_init: bool, target_model=None, model_format=None, build_model_ctx=None):
         """Build draft model."""
-        self.proposer.build_model(empty_init, target_model)
+        self.proposer.build_model(empty_init,
+                                  target_model=target_model,
+                                  model_format=model_format,
+                                  build_model_ctx=build_model_ctx)
 
     def build_graph_runner(self):
         """Build graph runner."""
@@ -432,11 +437,16 @@ class SpecModelAgent:
                                   swap_out_map: SwapMap = dict()):
         """Draft model forward."""
         with torch.cuda.stream(self.stream):
-            if model_inputs.spec_metadata.draft_token_ids is not None:
-                spec_metadata = model_inputs.spec_metadata
+            if model_inputs.is_decoding:
+                batch_size = model_inputs.input_ids.size(0)
+                draft_token_ids = model_inputs.input_ids.squeeze(0).unflatten(0, (batch_size, -1))[:, 1:].flatten()
+                num_draft_tokens = model_inputs.input_ids.new_full((batch_size, ), self.num_spec_tokens)
                 output_token_ids, num_rejected_tokens, last_token_ids = self.rejection_sampler(
-                    spec_inputs.target_logits, spec_metadata.draft_token_ids, spec_inputs.bonus_token_ids,
-                    spec_metadata.num_draft_tokens, spec_metadata.max_spec_len)
+                    spec_inputs.target_logits,
+                    draft_token_ids,
+                    spec_inputs.bonus_token_ids,
+                    num_draft_tokens,
+                )
                 spec_inputs.num_rejected_tokens = num_rejected_tokens
                 spec_inputs.reject_sample_tokens = output_token_ids
                 spec_inputs.next_token_ids = last_token_ids
@@ -445,6 +455,8 @@ class SpecModelAgent:
                 spec_inputs.next_token_ids = spec_inputs.bonus_token_ids
                 output_token_ids = spec_inputs.next_token_ids.unsqueeze(-1)
                 spec_inputs.last_token_indices = model_inputs.seq_length.cumsum(0) - 1
+                last_token_ids = spec_inputs.next_token_ids
+                num_rejected_tokens = None
 
             with record_function('draft_prepare_inputs'):
                 draft_model_inputs = self.proposer.prepare_inputs(model_inputs, spec_inputs)
@@ -453,7 +465,10 @@ class SpecModelAgent:
                                                                spec_inputs,
                                                                swap_in_map=swap_in_map,
                                                                swap_out_map=swap_out_map)
-            outputs = dict(output_token_ids=output_token_ids, spec_token_ids=new_draft_tokens)
+            outputs = dict(output_token_ids=output_token_ids,
+                           spec_token_ids=new_draft_tokens,
+                           last_token_ids=last_token_ids,
+                           num_rejected_tokens=num_rejected_tokens)
             return outputs
 
     def warmup(self, max_batches: int, target_model_config: ModelConfig):
@@ -461,28 +476,27 @@ class SpecModelAgent:
         target_hidden_size = self.proposer.get_target_hidden_size(target_model_config)
 
         # warmup prefill
-        inputs = ModelInputs.make_dummy(max_batches,
-                                        is_decoding=False,
-                                        device='cuda',
-                                        vocab_size=self.model_config.vocab_size)
-        inputs.target_hidden_states = torch.randn((1, max_batches, target_hidden_size),
-                                                  dtype=self.model_config.dtype,
-                                                  device='cuda')
+        inputs = self.inputs_strategy.make_dummy(max_batches,
+                                                 is_decoding=False,
+                                                 device='cuda',
+                                                 vocab_size=self.model_config.vocab_size,
+                                                 target_hidden_size=target_hidden_size,
+                                                 target_dtype=self.model_config.dtype)
+
         self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
 
         capture_batch_sizes = self.proposer.model.get_capture_batch_sizes()
         capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
 
         for batch_size in capture_batch_sizes:
-            inputs = ModelInputs.make_dummy(
+            inputs = self.inputs_strategy.make_dummy(
                 batch_size,
                 is_decoding=True,
                 device='cuda',
                 vocab_size=self.model_config.vocab_size,
+                target_hidden_size=self.model_config.hidden_size,
+                target_dtype=self.model_config.dtype,
             )
-            inputs.target_hidden_states = torch.randn((1, batch_size, self.model_config.hidden_size),
-                                                      dtype=self.model_config.dtype,
-                                                      device='cuda')
             self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
 
 
@@ -549,13 +563,6 @@ class BaseModelAgent:
         self.tp = tp
         self.world_size = world_size
         self.tp_rank = tp_rank
-        self.spec_agent = None
-        self.specdecode_config = specdecode_config
-
-        # only support spec model with tp1
-        if (dist_ctx.dp > 1 or rank % tp == 0) and specdecode_config is not None:
-            self.spec_agent = SpecModelAgent(specdecode_config, backend_config, self.stream, device)
-
         self.patched_model = None
         self.cache_engine = None
         self.profiler: AgentProfiler = None
@@ -573,6 +580,18 @@ class BaseModelAgent:
         self.strategy_factory = build_strategy_factory(model_config, misc_config, specdecode_config=specdecode_config)
         self.inputs_strategy = self.strategy_factory.build_model_inputs_strategy()
         self.agent_strategy = self.strategy_factory.build_model_agent_strategy()
+
+        # spec decoding
+        self.spec_agent = None
+        self.specdecode_config = specdecode_config
+
+        # only support spec model with tp1
+        if (dist_ctx.dp > 1 or rank % tp == 0) and specdecode_config is not None:
+            self.spec_agent = SpecModelAgent(specdecode_config,
+                                             backend_config,
+                                             self.stream,
+                                             self.inputs_strategy,
+                                             device=device)
 
     @contextmanager
     def all_context(self):
@@ -696,7 +715,7 @@ class BaseModelAgent:
                     return self._output[:, -1:], None
                 torch.cuda.synchronize()
                 if self._aux_output is not None:
-                     self._aux_output = self._aux_output.to(self._device)
+                    self._aux_output = self._aux_output.to(self._device)
                 return self._output.to(self._device), self._aux_output
 
         __forward = self.async_forward
@@ -726,7 +745,6 @@ class BaseModelAgent:
             return tmp_out
 
         origin_inputs = inputs
-        spec_metadata = inputs.spec_metadata
         # make long context inputs
         is_long_context = inputs.input_ids.numel() > max_prefill_token_num and not inputs.is_decoding
 
@@ -764,10 +782,9 @@ class BaseModelAgent:
 
         if self.spec_agent is not None:
             hidden_states = ret['hidden_states']
-            logits_indices = spec_metadata.logits_indices
-            if logits_indices is None:
-                logits_indices = origin_inputs.cumsum(0) - 1
-            hidden_states = hidden_states[:, logits_indices]
+            if not inputs.is_decoding:
+                logits_indices = origin_inputs.seq_length.cumsum(0) - 1
+                hidden_states = hidden_states[:, logits_indices]
             if 'aux_hidden_states' in ret:
                 # replace with aux
                 ret['hidden_states'] = ret.pop('aux_hidden_states')
@@ -949,7 +966,6 @@ class BaseModelAgent:
             need_broadcast_next = (dp == 1 and tp > 1 and idx < loop_count - 1)
 
             model_metas = output.get('model_metas')
-            spec_token_ids = None
             # sampling and stopping
             if need_output:
                 logger.debug(f'<ForwardTask> rank[{rank}]: Sampling [{idx}].')
@@ -963,42 +979,31 @@ class BaseModelAgent:
                     next_token_ids, extra_inputs = self.agent_strategy.post_sampling(
                         inputs, last_logits, next_token_ids, extra_inputs)
 
+                    if self.spec_agent is not None:
+                        spec_inputs = SpecDecodeInputs()
+                        spec_inputs.target_hidden_states = output['hidden_states']
+                        spec_inputs.target_position_ids = output.get('position_ids', None)
+                        if inputs.is_decoding:
+                            batch_size = inputs.seq_length.size(0)
+                            spec_inputs.target_logits = logits.unflatten(0, (batch_size, -1))[:, :-1].flatten(0, 1)
+                        else:
+                            spec_inputs.target_logits = logits
+                        spec_inputs.bonus_token_ids = next_token_ids
+                        spec_inputs.next_token_ids = next_token_ids
+                        spec_outs = await self.spec_agent.async_model_forward(inputs, spec_inputs)
+                        next_token_ids = spec_outs['output_token_ids']
+                        spec_token_ids = spec_outs['spec_token_ids']
+                        extra_inputs.draft_token_ids = spec_token_ids
+                        extra_inputs.last_token_ids = spec_outs['last_token_ids']
+                        extra_inputs.num_rejected_tokens = spec_outs['num_rejected_tokens']
+                        logits = None
+
                     # stopping criteria
                     stopped, stop_pos, stopping_criteria = stopping_criteria.step(next_token_ids,
                                                                                   sampling_inputs.stop_words,
                                                                                   inputs=inputs,
                                                                                   extra_inputs=extra_inputs)
-                #### start 
-                spec_inputs = SpecDecodeInputs()
-                if self.spec_agent is not None:
-                    spec_metadata = inputs.spec_metadata
-                    spec_inputs.target_hidden_states = output['hidden_states']
-                    spec_inputs.target_position_ids = output.get('position_ids', None)
-                    if spec_metadata.bonus_logits_indices is not None:
-                        bonus_logits = logits[spec_metadata.bonus_logits_indices]
-                        spec_inputs.target_logits = logits[spec_metadata.target_logits_indices]
-                        logits = bonus_logits
-                    # only sample on bonus logits
-                next_token_ids, logprobs = await self.async_sampling_logits(logits, sampling_inputs, inputs)
 
-                if self.spec_agent is not None:
-                    spec_inputs.bonus_token_ids = next_token_ids
-                    spec_inputs.next_token_ids = next_token_ids
-                    spec_outs = await self.spec_agent.async_model_forward(inputs, spec_inputs)
-                    output_token_ids = spec_outs['output_token_ids']
-                    spec_token_ids = spec_outs['spec_token_ids']
-                    stopped = _batch_multi_stopping_criteria(output_token_ids, sampling_inputs.stop_words,
-                                                             num_appendable_ids)
-                    next_token_ids = output_token_ids
-                    logits = None
-                else:
-                    num_ignore_eos = num_ignore_eos - 1
-                    # stopping criteria
-                    stopped, num_appendable_ids = _batch_stopping_criteria(next_token_ids, sampling_inputs.stop_words,
-                                                                           num_appendable_ids)
-                    stopped = stopped.int() - 1
-                    next_token_ids = next_token_ids.unsqueeze(-1)
-                #### end
             else:
                 # Avoid adding the ADInplaceOrView dispatch key to `next_token_ids`,
                 # as it can trigger recompilation on different ranks when using torch.compile.
@@ -1214,7 +1219,10 @@ class BaseModelAgent:
         with self.all_context():
             self._build_model()
             if self.spec_agent is not None:
-                self.spec_agent.build_model(self.misc_config.empty_init, self.patched_model)
+                self.spec_agent.build_model(self.misc_config.empty_init,
+                                            self.patched_model,
+                                            model_format=self.misc_config.model_format,
+                                            build_model_ctx=self.build_model_ctx)
 
     def build_graph_runner(self):
         """Build graph runner."""

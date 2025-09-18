@@ -193,11 +193,11 @@ class CUDAGraphRunner(GraphRunner):
             batch_size = self._get_capture_tokens(meta.padding_batch_size)
         return (batch_size, is_decoding, enable_microbatch)
 
-    def _get_max_tokens(self, graph_key: tuple):
+    def _get_max_tokens(self, graph_key: tuple, input_ids: torch.Tensor):
         max_batches = graph_key[0]
         is_decoding = graph_key[1]
         assert is_decoding
-        return self.cudagraph_strategy.get_max_tokens(max_batches)
+        return self.cudagraph_strategy.get_max_tokens(max_batches, input_ids)
 
     def __call__(self, **kwargs):
         """call."""
@@ -214,7 +214,7 @@ class CUDAGraphRunner(GraphRunner):
         max_batches = graph_key[0]
         is_decoding = graph_key[1]
         if graph_key not in self._runner_map:
-            max_tokens = self._get_max_tokens(graph_key)
+            max_tokens = self._get_max_tokens(graph_key, kwargs['input_ids'])
             runner = CUDASingleGraphRunner(self.model,
                                            max_batches=max_batches,
                                            max_tokens=max_tokens,

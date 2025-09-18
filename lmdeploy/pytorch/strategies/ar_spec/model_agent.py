@@ -9,8 +9,8 @@ from lmdeploy.pytorch.engine.logits_process import SamplingInputs
 from lmdeploy.pytorch.messages import SchedulerSequence
 from lmdeploy.pytorch.model_inputs import ModelInputs
 
-from ..base.model_agent import ExtraInputs, ExtraOutputs, ModelAgentStrategy
 from ..ar.model_agent import ARStoppingCriteria
+from ..base.model_agent import ExtraInputs, ExtraOutputs, ModelAgentStrategy
 
 SeqList = List[SchedulerSequence]
 
@@ -19,7 +19,8 @@ class ARSpecExtraInputs(ExtraInputs):
     """ARSpec extra inputs."""
     draft_token_ids: torch.Tensor = None
     num_rejected_tokens: torch.Tensor = None
-    next_token_ids: torch.Tensor = None
+    last_token_ids: torch.Tensor = None
+
 
 class ARSpecExtraOutputs(ExtraOutputs):
     """ARSpec extra outputs."""
@@ -41,7 +42,7 @@ class ARSpecStoppingCriteria(ARStoppingCriteria):
             token_ids = token_ids.unsqueeze(-1)
         if token_ids.size(-1) == 1:
             return super().step(token_ids, stop_words, inputs, extra_inputs)
-        
+
         mask = (self.num_appendable_ids.unsqueeze(-1) - (token_ids > -1).cumsum(dim=-1)) <= 0
         if stop_words is not None:
             token_ids_rsp = token_ids.unsqueeze(-1).repeat(1, 1, stop_words.numel())
@@ -50,9 +51,9 @@ class ARSpecStoppingCriteria(ARStoppingCriteria):
             stop_mask = (token_ids_rsp == stop_words_rsp).any(-1)
             mask = mask ^ stop_mask
         # find the index of first `1`,  if not found, would be 0
-        stop_pos = torch.argmax(mask.int(), dim=-1, keepdim=True)
+        index = torch.argmax(mask.int(), dim=-1, keepdim=True)
         # update index of 0 to -1 if not found
-        index = torch.where(index == 0, mask[:, 0:1].int() - 1, index).ravel()
+        stop_pos = torch.where(index == 0, mask[:, 0:1].int() - 1, index).ravel()
         # TODO check if sync
         num_valid_tokens = (token_ids > -1).sum(dim=-1)
         num_appendable_ids = torch.clamp_max(self.num_appendable_ids - num_valid_tokens, 0)
@@ -61,6 +62,7 @@ class ARSpecStoppingCriteria(ARStoppingCriteria):
 
 
 class ARSpecModelAgentStrategy(ModelAgentStrategy):
+
     def __init__(self, num_spec_tokens: int):
         self.num_spec_tokens = num_spec_tokens
 
@@ -105,7 +107,7 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
 
     def make_extra_outputs(self, extra_inputs: ARSpecExtraInputs) -> ARSpecExtraOutputs:
         """Create extra outputs."""
-        return ARSpecExtraOutputs()
+        return ARSpecExtraOutputs(draft_token_ids=extra_inputs.draft_token_ids)
 
     def update_inputs_for_next_step(self, model_inputs: 'ModelInputs', sampling_inputs: 'SamplingInputs',
                                     next_token_ids: torch.Tensor, model_metas: Any, extra_inputs: ARSpecExtraInputs,
@@ -116,7 +118,7 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
         step_seqlens -= extra_inputs.num_rejected_tokens
         model_inputs.step(next_token_ids, step_seqlens)
         model_inputs.input_ids[:, -self.num_spec_tokens:] = extra_inputs.draft_token_ids
-        model_inputs.input_ids[:, 0:1] = extra_inputs.next_token_ids
+        model_inputs.input_ids[:, 0:1] = extra_inputs.last_token_ids
         # TODO check this
         self._step_sampling_inputs(sampling_inputs, next_token_ids)
         return model_inputs, extra_inputs

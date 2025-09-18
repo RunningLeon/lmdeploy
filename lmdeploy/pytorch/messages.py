@@ -498,6 +498,8 @@ class SchedulerSequence:
 
     # For logging
     engine_events: List[EngineEvent] = field(default_factory=list)
+    # spec decode
+    draft_token_ids: np.ndarray = np.empty(0, dtype=np.int64)
 
     def __post_init__(self):
         """Post init."""

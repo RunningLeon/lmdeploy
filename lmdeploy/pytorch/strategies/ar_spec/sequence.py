@@ -1,19 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 import numpy as np
 from torch import Tensor
 
-from lmdeploy.pytorch import consts
-from lmdeploy.pytorch.disagg.conn.protocol import MigrationRequest
 from lmdeploy.pytorch.engine.model_agent import BatchedOutputs
-from lmdeploy.pytorch.messages import (HistoryTokenIds, InputEmbeddings, MessageStatus, MultiModalInputs, SamplingParam,
-                                       SchedulerSession, UpdateTokenMode, _to_ndarray)
+from lmdeploy.pytorch.messages import InputEmbeddings, MessageStatus, MultiModalInputs, UpdateTokenMode, _to_ndarray
 
-from ..ar.sequence import SchedulerSequenceDefault
-from ..base.sequence import SequenceStrategy
+from ..ar.sequence import ARSequenceStrategy, SchedulerSequenceDefault
 
 SeqList = List['SchedulerSequenceARSpec']
 
@@ -35,35 +30,14 @@ class SchedulerSequenceARSpec(SchedulerSequenceDefault):
         if draft_token_ids is not None:
             self.draft_token_ids = _to_ndarray(draft_token_ids)
         super().update_token_ids(token_ids,
-                                    multimodals=multimodals,
-                                    embeddings=embeddings,
-                                    model_meta=model_meta,
-                                    mode=mode,
-                                    **kwargs)
+                                 multimodals=multimodals,
+                                 embeddings=embeddings,
+                                 model_meta=model_meta,
+                                 mode=mode,
+                                 **kwargs)
 
 
-class ARSpecSequenceStrategy(SequenceStrategy):
-
-    def __init__(self, num_spec_tokens: int, pad_token_id: int) -> None:
-        self.num_spec_tokens = num_spec_tokens
-        self.pad_token_id = pad_token_id
-
-    def make_sequence(self,
-                      seq_id: int,
-                      session: 'SchedulerSession',
-                      sampling_param: 'SamplingParam' = None,
-                      adapter_name: str = None,
-                      migration_request: Optional[MigrationRequest] = None,
-                      resp_cache: bool = False,
-                      preserve_cache: bool = False) -> 'SchedulerSequenceARSpec':
-        """Make sequence."""
-        return SchedulerSequenceARSpec(seq_id=seq_id,
-                                     session=session,
-                                     sampling_param=sampling_param,
-                                     adapter_name=adapter_name,
-                                     migration_request=migration_request,
-                                     resp_cache=resp_cache,
-                                     preserve_cache=preserve_cache)
+class ARSpecSequenceStrategy(ARSequenceStrategy):
 
     def update_running(self, running: SeqList, batched_outputs: BatchedOutputs, is_decoding: bool) -> None:
         """Update running sequences."""
