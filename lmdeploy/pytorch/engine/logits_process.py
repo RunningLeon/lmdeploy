@@ -392,8 +392,8 @@ class FusedLogitsProcessor:
             offsets = sampling_inputs.random_offsets
             return _multinomial_sampling(softmax_scores, seeds, offsets, indices)
 
-        if self.sampling_vocab_size is not None and logits.size(1) > self.sampling_vocab_size:
-            logits = logits[..., :self.sampling_vocab_size]
+        # if self.sampling_vocab_size is not None and logits.size(1) > self.sampling_vocab_size:
+        #     logits = logits[..., :self.sampling_vocab_size]
 
         if sampling_inputs.max_top_k == 1:
             return logits.argmax(-1)
