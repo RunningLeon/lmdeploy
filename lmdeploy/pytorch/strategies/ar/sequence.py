@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import torch
 from torch import Tensor
 
 from lmdeploy.pytorch.disagg.conn.protocol import MigrationRequest
@@ -24,6 +25,7 @@ class SchedulerSequenceDefault(SchedulerSequence):
                          embeddings: List[InputEmbeddings] = None,
                          model_meta: Dict[str, Any] = None,
                          mode: UpdateTokenMode = UpdateTokenMode.INPUTS,
+                         routed_experts: Tensor = None,
                          **kwargs):
         """Update token ids, old token ids will be added to history."""
         # update history image nums
@@ -35,6 +37,13 @@ class SchedulerSequenceDefault(SchedulerSequence):
         token_ids = _to_ndarray(token_ids)
 
         num_valid = len(token_ids)
+        # record cached expert ids
+        if self.output_routed_experts:
+            if routed_experts is not None:
+                if self.all_routed_experts is None:
+                    self.all_routed_experts = routed_experts
+                else:
+                    self.all_routed_experts = torch.cat([self.all_routed_experts, routed_experts], dim=0)
 
         if mode == UpdateTokenMode.INPUTS:
             self.arrive_time = time.perf_counter()
@@ -72,8 +81,15 @@ class SchedulerSequenceDefault(SchedulerSequence):
             self._num_history_cross = self.history_multimodals.get_encoder_len(0, self.num_history_ids)
             self._num_cross = self.history_multimodals.get_encoder_len(self._num_history_ids, num_all_ids)
 
+        if self.output_routed_experts:
+            self.all_routed_experts = None
+
 
 class ARSequenceStrategy(SequenceStrategy):
+
+    def __init__(self, model_config: Any):
+        """config."""
+        self.model_config = model_config
 
     def make_sequence(self,
                       seq_id: int,
@@ -84,13 +100,17 @@ class ARSequenceStrategy(SequenceStrategy):
                       resp_cache: bool = False,
                       preserve_cache: bool = False) -> 'SchedulerSequence':
         """Make sequence."""
-        return SchedulerSequenceDefault(seq_id=seq_id,
-                                        session=session,
-                                        sampling_param=sampling_param,
-                                        adapter_name=adapter_name,
-                                        migration_request=migration_request,
-                                        resp_cache=resp_cache,
-                                        preserve_cache=preserve_cache)
+        output_routed_experts = getattr(self.model_config.hf_config, 'output_routed_experts', False)
+        return SchedulerSequenceDefault(
+            seq_id=seq_id,
+            session=session,
+            sampling_param=sampling_param,
+            adapter_name=adapter_name,
+            migration_request=migration_request,
+            resp_cache=resp_cache,
+            preserve_cache=preserve_cache,
+            output_routed_experts=output_routed_experts,
+        )
 
     def update_running(self, running: SeqList, batched_outputs: BatchedOutputs, is_decoding: bool) -> None:
         """Update running sequences."""
@@ -102,12 +122,22 @@ class ARSequenceStrategy(SequenceStrategy):
             model_metas = [None] * len(running)
 
         next_token_ids = next_token_ids.numpy()
+        all_routed_experts = [None] * len(running)
+        if is_decoding:
+            num_tokens = [1] * len(running)
+        else:
+            num_tokens = [msg.num_token_ids for msg in running]
+
+        if batched_outputs.extra_outputs.all_routed_experts is not None:
+            all_routed_experts = batched_outputs.extra_outputs.all_routed_experts.split(num_tokens, dim=0)
+
         update_mode = UpdateTokenMode.DECODE if is_decoding else UpdateTokenMode.PREFILL
-        for token, msg, stop, model_meta in zip(next_token_ids, running, stopped, model_metas):
+        for token, msg, stop, model_meta, routed_experts in zip(next_token_ids, running, stopped, model_metas,
+                                                                all_routed_experts):
             if msg.status != MessageStatus.LOCKED:
                 continue
 
             # fill token
-            msg.update_token_ids(token, model_meta=model_meta, mode=update_mode)
+            msg.update_token_ids(token, model_meta=model_meta, mode=update_mode, routed_experts=routed_experts)
             if stop:
                 msg.status = MessageStatus.TO_BE_MIGRATED if msg.preserve_cache else MessageStatus.STOPPED
