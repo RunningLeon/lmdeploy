@@ -17,12 +17,16 @@ from ..base.model_agent import ExtraInputs, ExtraOutputs, ModelAgentStrategy, St
 SeqList = List[SchedulerSequence]
 
 
+@dataclass
 class ARExtraInputs(ExtraInputs):
     """Ar extra inputs."""
+    all_expert_ids: torch.Tensor = None
 
 
+@dataclass
 class ARExtraOutputs(ExtraOutputs):
     """Ar extra outputs."""
+    all_expert_ids: torch.Tensor = None
 
 
 @dataclass
@@ -93,7 +97,7 @@ class ARModelAgentStrategy(ModelAgentStrategy):
 
     def make_extra_outputs(self, extra_inputs: ARExtraInputs) -> ARExtraOutputs:
         """Create extra outputs."""
-        return ARExtraOutputs()
+        return ARExtraOutputs(all_expert_ids=extra_inputs.all_expert_ids)
 
     def update_inputs_for_next_step(self, model_inputs: 'ModelInputs', sampling_inputs: 'SamplingInputs',
                                     next_token_ids: torch.Tensor, model_metas: Any, extra_inputs: ARExtraInputs,

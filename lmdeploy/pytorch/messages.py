@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
+import torch
 from torch import Tensor
 
 from lmdeploy.messages import EngineEvent, EventType, GenerationConfig, LogitsProcessor
@@ -56,6 +57,7 @@ class SamplingParam:
     out_logits: bool = False
     out_last_hidden_states: bool = False
     num_logprobs: int = -1
+    output_expert_ids: bool = False
 
     @classmethod
     def from_gen_config(cls, gen_config: GenerationConfig):
@@ -499,6 +501,11 @@ class SchedulerSequence:
     # For logging
     engine_events: List[EngineEvent] = field(default_factory=list)
 
+    # for debug expert ids
+    num_moe_layers: int = None
+    num_experts_per_tok: int = None
+    all_experts_ids: Any = None
+
     def __post_init__(self):
         """Post init."""
         self._seq_meta: SequenceMeta = self.session.seq_meta
@@ -510,6 +517,14 @@ class SchedulerSequence:
         self._num_images: int = len(self.history_embeddings)
         self._num_history_cross: int = 0
         self._num_cross: int = self.history_multimodals.get_encoder_len(0, self._num_token_ids)
+
+        if self.output_expert_ids:
+            assert self.num_experts_per_tok is not None
+            assert self.num_moe_layers is not None
+            self.all_experts_ids = torch.full((0, self.num_moe_layers, self.num_experts_per_tok),
+                                              -1,
+                                              dtype=torch.int32,
+                                              device='cpu')
 
     @property
     def block_size(self) -> int:
@@ -565,6 +580,16 @@ class SchedulerSequence:
         end = self.num_valid_ids
         start = end - self.num_new_tokens
         return self.history_cache._token_ids[start:end]
+
+    @property
+    def expert_ids(self) -> np.ndarray:
+        if not self.output_expert_ids:
+            return None
+        return self.all_experts_ids[:self.num_valid_ids]
+
+    @property
+    def output_expert_ids(self):
+        return self.num_moe_layers is not None
 
     @property
     def num_history_ids(self):

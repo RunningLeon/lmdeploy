@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import torch
 from torch import Tensor
 
 from lmdeploy.pytorch.disagg.conn.protocol import MigrationRequest
@@ -24,6 +25,7 @@ class SchedulerSequenceDefault(SchedulerSequence):
                          embeddings: List[InputEmbeddings] = None,
                          model_meta: Dict[str, Any] = None,
                          mode: UpdateTokenMode = UpdateTokenMode.INPUTS,
+                         expert_ids: Tensor = None,
                          **kwargs):
         """Update token ids, old token ids will be added to history."""
         # update history image nums
@@ -35,6 +37,19 @@ class SchedulerSequenceDefault(SchedulerSequence):
         token_ids = _to_ndarray(token_ids)
 
         num_valid = len(token_ids)
+        # record cached expert ids
+        if self.output_expert_ids:
+            if mode == UpdateTokenMode.INPUTS:
+                new_expert_ids = torch.full((num_valid, self.num_moe_layers, self.num_experts_per_tok),
+                                            -1,
+                                            dtype=torch.int32,
+                                            device='cpu')
+                self.all_experts_ids = torch.cat([self.all_experts_ids, new_expert_ids], dim=0)
+            elif mode == UpdateTokenMode.PREFILL:
+                self.all_experts_ids[-self.num_token_ids:] = expert_ids
+            else:
+                assert expert_ids is not None
+                self.all_experts_ids = torch.cat([self.all_experts_ids, expert_ids], dim=0)
 
         if mode == UpdateTokenMode.INPUTS:
             self.arrive_time = time.perf_counter()
@@ -72,8 +87,15 @@ class SchedulerSequenceDefault(SchedulerSequence):
             self._num_history_cross = self.history_multimodals.get_encoder_len(0, self.num_history_ids)
             self._num_cross = self.history_multimodals.get_encoder_len(self._num_history_ids, num_all_ids)
 
+        if self.output_expert_ids:
+            self.all_experts_ids = self.all_experts_ids[:step]
+
 
 class ARSequenceStrategy(SequenceStrategy):
+
+    def __init__(self, model_config: Any):
+        """config."""
+        self.model_config = model_config
 
     def make_sequence(self,
                       seq_id: int,
@@ -84,13 +106,22 @@ class ARSequenceStrategy(SequenceStrategy):
                       resp_cache: bool = False,
                       preserve_cache: bool = False) -> 'SchedulerSequence':
         """Make sequence."""
-        return SchedulerSequenceDefault(seq_id=seq_id,
-                                        session=session,
-                                        sampling_param=sampling_param,
-                                        adapter_name=adapter_name,
-                                        migration_request=migration_request,
-                                        resp_cache=resp_cache,
-                                        preserve_cache=preserve_cache)
+        num_moe_layers = None
+        num_experts_per_tok = None
+        if getattr(self.model_config.hf_config, 'cache_expert_ids', False):
+            num_experts_per_tok = self.model_config.hf_config.num_experts_per_tok
+            num_moe_layers = self.model_config.num_layers
+        return SchedulerSequenceDefault(
+            seq_id=seq_id,
+            session=session,
+            sampling_param=sampling_param,
+            adapter_name=adapter_name,
+            migration_request=migration_request,
+            resp_cache=resp_cache,
+            preserve_cache=preserve_cache,
+            num_experts_per_tok=num_experts_per_tok,
+            num_moe_layers=num_moe_layers,
+        )
 
     def update_running(self, running: SeqList, batched_outputs: BatchedOutputs, is_decoding: bool) -> None:
         """Update running sequences."""
@@ -102,12 +133,23 @@ class ARSequenceStrategy(SequenceStrategy):
             model_metas = [None] * len(running)
 
         next_token_ids = next_token_ids.numpy()
+        all_expert_ids = [None] * len(running)
+        if batched_outputs.extra_outputs.all_expert_ids is not None:
+            # TODO make it better
+            all_expert_ids = batched_outputs.extra_outputs.all_expert_ids
+            split_sizes = [msg.num_token_ids for msg in running]
+            if len(split_sizes) > 1:
+                all_expert_ids = all_expert_ids.split_with_sizes(split_sizes, dim=0)
+            else:
+                all_expert_ids = [all_expert_ids]
+
         update_mode = UpdateTokenMode.DECODE if is_decoding else UpdateTokenMode.PREFILL
-        for token, msg, stop, model_meta in zip(next_token_ids, running, stopped, model_metas):
+        for token, msg, stop, model_meta, expert_ids in zip(next_token_ids, running, stopped, model_metas,
+                                                            all_expert_ids):
             if msg.status != MessageStatus.LOCKED:
                 continue
 
             # fill token
-            msg.update_token_ids(token, model_meta=model_meta, mode=update_mode)
+            msg.update_token_ids(token, model_meta=model_meta, mode=update_mode, expert_ids=expert_ids)
             if stop:
                 msg.status = MessageStatus.TO_BE_MIGRATED if msg.preserve_cache else MessageStatus.STOPPED

@@ -48,6 +48,8 @@ class GenOut:
     # for disaggregation
     cache_block_ids: List[int] = None
 
+    expert_ids: torch.Tensor = None
+
 
 def _gen_out_to_response(out: GenOut, index) -> Response:
     return Response(text=out.response,
@@ -58,6 +60,7 @@ def _gen_out_to_response(out: GenOut, index) -> Response:
                     logprobs=out.logprobs,
                     last_hidden_state=out.last_hidden_state,
                     logits=out.logits,
+                    expert_ids=out.expert_ids,
                     index=index)
 
 
@@ -75,6 +78,7 @@ def _append_response(dst: Response, src: Response):
     if src.logprobs:
         dst.logprobs = dst.logprobs or []
         dst.logprobs += src.logprobs
+    dst.expert_ids = src.expert_ids
     return dst
 
 
@@ -841,6 +845,7 @@ class AsyncEngine(LogitsMixin):
                                  gen_len,
                                  finish_reason,
                                  token_ids=res,
+                                 expert_ids=outputs.expert_ids,
                                  cache_block_ids=outputs.cache_block_ids)
 
                     if outputs.logprobs is not None:
@@ -888,6 +893,7 @@ class AsyncEngine(LogitsMixin):
                                  logprobs=logprobs,
                                  logits=logits,
                                  last_hidden_state=last_hidden_state,
+                                 expert_ids=outputs.expert_ids,
                                  cache_block_ids=outputs.cache_block_ids)
                     # Update a session's sequence only when it is in finished status
                     if outputs.status == ResponseType.FINISH:
@@ -903,6 +909,7 @@ class AsyncEngine(LogitsMixin):
                                  input_token_len=len(input_ids),
                                  generate_token_len=0,
                                  finish_reason='error',
+                                 expert_ids=outputs.expert_ids,
                                  token_ids=[])
             # update step
             if sequence_end:

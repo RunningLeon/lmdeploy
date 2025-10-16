@@ -376,6 +376,7 @@ class PytorchEngineConfig:
     hf_overrides: Optional[Dict[str, Any]] = None
     disable_vision_encoder: bool = False
     logprobs_mode: str = None
+    cache_expert_ids: bool = True
 
     # dllm
     dllm_block_length: int = None
@@ -457,14 +458,16 @@ class Response:
     logits: torch.Tensor = None
     last_hidden_state: torch.Tensor = None
     index: int = 0
+    expert_ids: Any = None
 
     def __repr__(self):
         logits = 'logits=None' if self.logits is None else f'logits.shape={self.logits.shape}\nlogits={self.logits}'
         hidden_state = (
             'last_hidden_state=None' if self.last_hidden_state is None else
             f'last_hidden_state.shape={self.last_hidden_state.shape}\nlast_hidden_state={self.last_hidden_state}')
-        s = (f'text={self.text}\ngenerate_token_len={self.generate_token_len}\nfinish_reason="{self.finish_reason}"\n'
+        s = (f'text={self.text!r}\ngenerate_token_len={self.generate_token_len}\nfinish_reason="{self.finish_reason}"\n'
              f'token_ids={self.token_ids}\nlog_probs={self.logprobs}\n{logits}\n{hidden_state}')
+        s += '\nexpert_ids=None' if self.expert_ids is None else f'\nexpert_ids.shape={self.expert_ids.shape}'
         return s
 
 
@@ -546,6 +549,7 @@ class EngineOutput:
     last_hidden_state: torch.Tensor = None
     cache_block_ids: Optional[List[int]] = None
     req_metrics: Optional[RequestMetrics] = None
+    expert_ids: torch.Tensor = None
 
 
 @dataclass
