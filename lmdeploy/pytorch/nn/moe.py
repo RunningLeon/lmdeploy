@@ -33,9 +33,9 @@ class SoftmaxTopK(nn.Module):
         impl_builder = get_backend().get_layer_impl_builder(OpType.SoftmaxTopK)
         self.impl = impl_builder.build(top_k, dim)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, **kwargs):
         """forward."""
-        return self.impl.forward(x)
+        return self.impl.forward(x, **kwargs)
 
 
 def create_mlp_weights(hidden_dim: int, ffn_dim: int, num_experts: int, dtype: torch.dtype, device: torch.device):

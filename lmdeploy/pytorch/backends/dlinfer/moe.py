@@ -16,7 +16,7 @@ class DlinferSoftmaxTopKImpl(SoftmaxTopKImpl):
         self.top_k = top_k
         self.dim = dim
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, **kwargs):
         routing_weights, selected_experts = moe_gating_topk_softmax(x, self.top_k)
         return routing_weights, selected_experts
 

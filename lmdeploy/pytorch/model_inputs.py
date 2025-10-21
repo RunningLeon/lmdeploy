@@ -321,6 +321,7 @@ class StepContext:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: DPMeta = None
     enable_microbatch: bool = False
+    router_caches: List[torch.Tensor] = None
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -331,6 +332,7 @@ class StepContext:
         model_config: ModelConfig,
         kv_caches: List = None,
         kv_quant_policy: Literal[0, 4, 8] = 0,
+        router_caches: List[torch.Tensor] = None,
     ):
         """Build step context.
 
@@ -379,6 +381,7 @@ class StepContext:
             kv_seqlens=kv_seqlens,
             q_start_loc=q_start_loc,
             kv_caches=kv_caches,
+            router_caches=router_caches,
             is_decoding=inputs.is_decoding,
             sum_kv_seqlen=inputs.sum_kv_seqlen,
             local_adapter_ids=inputs.local_adapter_ids,
@@ -449,19 +452,19 @@ class StepContextManager:
         self.build_ctx = build_ctx
 
     @record_function('build_step_context')
-    def build_context(
-        self,
-        inputs: ModelInputs,
-        model_config: ModelConfig,
-        kv_caches: List = None,
-        kv_quant_policy: Literal[0, 4, 8] = 0,
-    ):
+    def build_context(self,
+                      inputs: ModelInputs,
+                      model_config: ModelConfig,
+                      kv_caches: List = None,
+                      kv_quant_policy: Literal[0, 4, 8] = 0,
+                      router_caches: List[torch.Tensor] = None):
         """Build context."""
         return StepContext.new(
             inputs,
             model_config,
             kv_caches,
             kv_quant_policy,
+            router_caches=router_caches,
         )
 
     def set_context(self, ctx: StepContext):

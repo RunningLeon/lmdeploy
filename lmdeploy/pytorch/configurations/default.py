@@ -27,7 +27,9 @@ class DefaultModelConfigBuilder(AutoModelConfigBuilder):
         tp = kwargs.get('tp', 1)
         # update num_kv_heads for tp mode
         num_key_value_heads = cls.update_num_kv_heads(hf_config, tp, num_key_value_heads)
-
+        num_experts_per_tok = getattr(hf_config, 'num_experts_per_tok', None)
+        mlp_only_layers = getattr(hf_config, 'mlp_only_layers', [])
+        num_moe_layers = hf_config.num_hidden_layers - len(mlp_only_layers)
         return ModelConfig(
             hidden_size=hf_config.hidden_size,
             num_layers=hf_config.num_hidden_layers,
@@ -39,4 +41,6 @@ class DefaultModelConfigBuilder(AutoModelConfigBuilder):
             head_dim=head_dim,
             vocab_size=hf_config.vocab_size,
             llm_config=hf_config,
+            num_experts_per_tok=num_experts_per_tok,
+            num_moe_layers=num_moe_layers,
         )

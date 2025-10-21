@@ -62,6 +62,7 @@ class CacheEngine:
         # Initialize the cache.
         self.local_gpu_cache = self.allocate_gpu_cache()
         self.local_cpu_cache = self.allocate_cpu_cache()
+        self.local_router_cache = self.allocate_router_cache()
 
         self.migration_backend_impl: Optional[MigrationBackendImpl] = None
 
@@ -83,6 +84,11 @@ class CacheEngine:
     def gpu_cache(self):
         """Gpu cache."""
         return self.local_gpu_cache
+
+    @property
+    def router_cache(self):
+        """Moe router cache for expert ids."""
+        return self.local_router_cache
 
     @property
     def num_gpu_blocks(self):
@@ -115,6 +121,16 @@ class CacheEngine:
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2
         return attn_backend.get_k_block_shape(block_size, num_heads, head_size, dtype)
+
+    @classmethod
+    def _get_router_block_shape_impl(cls,
+                                     model_config: ModelConfig,
+                                     block_size: int,
+                                     world_size: int = 1,
+                                     local: bool = True):
+        if not model_config.cache_expert_ids:
+            return None
+        return (block_size, model_config.num_experts_per_tok)
 
     @classmethod
     def _get_value_block_shape_impl(cls,
@@ -164,6 +180,15 @@ class CacheEngine:
             head_size=head_size,
             world_size=self.world_size,
             quant_policy=self.cache_config.quant_policy,
+            local=local,
+        )
+
+    def get_router_block_shape(self, local: bool = False) -> Tuple[int, int, int]:
+        """Get shape of moe router expert ids block."""
+        return self._get_router_block_shape_impl(
+            self.model_config,
+            block_size=self.block_size,
+            world_size=self.world_size,
             local=local,
         )
 
@@ -218,6 +243,20 @@ class CacheEngine:
         self.full_cpu_cache = caches
         self.local_cpu_cache = list(zip(*caches))
         return self.local_cpu_cache
+
+    def allocate_router_cache(self):
+        """Allocate caches for moe expert ids."""
+        if not self.model_config.cache_expert_ids:
+            return None
+        num_layers = self.model_config.num_layers
+        num_blocks = self.num_gpu_blocks
+        block_shape = self.get_router_block_shape(local=True)
+        cache = torch.empty(
+            size=(num_layers, num_blocks, *block_shape),
+            dtype=self.model_config.moe_router_dtype,
+            device='cuda',
+        )
+        return cache
 
     @torch.inference_mode()
     def _swap(self, src: List[torch.Tensor], dst: List[torch.Tensor], src_to_dst: Dict[int, int]):
@@ -315,6 +354,17 @@ class CacheEngine:
             raise ValueError(f'unsupported quant_policy {quant_policy}')
 
         total = num_layers * (mem_key_block + mem_value_block)
+
+        # for cache moe expert ids
+        if model_config.cache_expert_ids:
+            router_block_shape = cls._get_router_block_shape_impl(model_config,
+                                                                  block_size,
+                                                                  world_size=world_size,
+                                                                  local=True)
+            if router_block_shape is not None:
+                router_block = torch.empty(router_block_shape, dtype=model_config.moe_router_dtype, device='meta')
+                mem_router_block = router_block.numel() * router_block.element_size()
+                total += model_config.num_moe_layers * mem_router_block
         return total
 
     """ Metheds for PD Disaggregation Begin. """

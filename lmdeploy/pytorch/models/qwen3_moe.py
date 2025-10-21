@@ -220,12 +220,14 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             layer_idx=layer_idx,
         )
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, router_cache: torch.Tensor = None, attn_metadata: Any = None):
         """forward."""
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(hidden_states)
-        topk_weights, topk_ids = self.softmax_topk(router_logits)
+        topk_weights, topk_ids = self.softmax_topk(router_logits,
+                                                   router_cache=router_cache,
+                                                   attn_metadata=attn_metadata)
         if get_dist_manager().current_context().dist_config.enable_eplb:
             topk_ids = EPLBManager.topk_ids_logical_to_physical(topk_ids, self.eplb_dispatch_info)
         out_states = self.experts(
@@ -277,6 +279,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         past_key_value: Optional[List[torch.FloatTensor]],
         residual: Optional[torch.Tensor] = None,
         attn_metadata: Any = None,
+        router_cache: torch.Tensor = None,
     ):
 
         if residual is None:
@@ -295,7 +298,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, router_cache=router_cache)
 
         outputs = (hidden_states, residual)
         return outputs
@@ -346,6 +349,7 @@ class Qwen3MoeModel(nn.Module):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         attn_metadata: Any = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        router_caches: List[torch.Tensor] = None,
     ):
         """Rewrite of LlamaModel.forward."""
 
@@ -362,15 +366,16 @@ class Qwen3MoeModel(nn.Module):
 
         # decoding
         residual = None
+        if router_caches is None:
+            router_caches = [None] * len(self.layers)
         for idx, decoder_layer in enumerate(self.layers):
             past_key_value = past_key_values[idx]
-            hidden_states, residual = decoder_layer(
-                hidden_states,
-                rotary_pos_emb=rotary_pos_emb,
-                past_key_value=past_key_value,
-                residual=residual,
-                attn_metadata=attn_metadata,
-            )
+            hidden_states, residual = decoder_layer(hidden_states,
+                                                    rotary_pos_emb=rotary_pos_emb,
+                                                    past_key_value=past_key_value,
+                                                    residual=residual,
+                                                    attn_metadata=attn_metadata,
+                                                    router_cache=router_caches[idx])
 
         # norm
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -421,6 +426,7 @@ class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
         past_key_values: List[List[torch.Tensor]],
         attn_metadata: Any = None,
         inputs_embeds: torch.Tensor = None,
+        router_caches: List[torch.Tensor] = None,
         **kwargs,
     ):
         """Model forward, return logits."""
@@ -430,6 +436,7 @@ class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
             past_key_values=past_key_values,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
+            router_caches=router_caches,
         )
         return hidden_states
 
@@ -468,6 +475,7 @@ class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
             past_key_values=past_key_values,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
+            router_caches=context.router_caches,
         )
 
     def _load_weight_experts(self, name: str, loaded_weight: torch.Tensor, params_dict: Dict[str, nn.Parameter],

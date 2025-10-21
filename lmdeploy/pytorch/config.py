@@ -86,6 +86,7 @@ class CacheConfig:
     enable_prefix_caching: bool = False
     quant_policy: Literal[0, 4, 8] = 0
     device_type: str = 'cuda'
+    cache_expert_ids: bool = False
 
     # For PD Disaggregation
     role: EngineRole = EngineRole.Hybrid
@@ -207,18 +208,25 @@ class ModelConfig:
     model_paradigm: str = 'ar'
     dllm_mask_token: int = 0
     dllm_block_length: int = None
+    num_moe_layers: int = None
+    num_experts_per_tok: int = None
+    cache_expert_ids: bool = False
+    moe_router_dtype: torch.dtype = torch.int16
 
     def get_head_size(self):
         """Get head size."""
         return self.head_dim
 
     @classmethod
-    def from_pretrained(cls,
-                        pretrained_model_name_or_path: str,
-                        trust_remote_code: bool = True,
-                        dtype: str = 'auto',
-                        dist_config: DistConfig = None,
-                        hf_overrides: Dict[str, Any] = None):
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        trust_remote_code: bool = True,
+        dtype: str = 'auto',
+        dist_config: DistConfig = None,
+        hf_overrides: Dict[str, Any] = None,
+        cache_expert_ids: bool = False,
+    ):
         """Instantiate one of the configuration classes of the library from a
         pretrained model configuration.
 
@@ -248,6 +256,11 @@ class ModelConfig:
             logger = get_logger('lmdeploy')
             logger.warning(f'Overriding HF config with {hf_overrides}')
             override_hf_config(model_config.hf_config, hf_overrides)
+
+        # Update for moe models
+        if model_config.num_moe_layers and cache_expert_ids:
+            model_config.hf_config.cache_expert_ids = True
+        model_config.cache_expert_ids = cache_expert_ids
 
         return model_config
 

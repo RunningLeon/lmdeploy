@@ -233,6 +233,7 @@ def model_forward(
             model_config=cache_engine.model_config,
             kv_caches=cache_engine.gpu_cache,
             kv_quant_policy=cache_engine.cache_config.quant_policy,
+            router_caches=cache_engine.router_cache,
         )
         with ctx_mgr.context(context):
             model_metas = None

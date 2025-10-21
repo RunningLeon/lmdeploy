@@ -376,6 +376,7 @@ class PytorchEngineConfig:
     hf_overrides: Optional[Dict[str, Any]] = None
     disable_vision_encoder: bool = False
     logprobs_mode: str = None
+    cache_expert_ids: bool = False
 
     # dllm
     dllm_block_length: int = None
