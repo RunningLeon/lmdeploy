@@ -58,6 +58,7 @@ class InferOutput:
 
     # expert ids
     expert_ids: torch.Tensor = None
+    all_logprobs: torch.Tensor = None
 
 
 def _tensorlize_block_offsets(block_offsets, dtype=torch.int32):
@@ -447,7 +448,7 @@ class Engine(EngineBase):
             engine_config (PytorchEngineConfig): Pytorch engine config.
             trust_remote_code (bool): Trust remote code
         """
-        if engine_config is not None and engine_config.enable_mp_engine and False:
+        if engine_config is not None and engine_config.enable_mp_engine:
             from .mp_engine import build_mp_engine
             backend = engine_config.mp_engine_backend
             return build_mp_engine(backend=backend,
@@ -865,6 +866,7 @@ class Engine(EngineBase):
 
             req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events)
             expert_ids = msg.expert_ids if finish else None
+            all_logprobs = msg.logprobs if finish else None
             out = InferOutput(session_id=session_id,
                               resp=msg.resp,
                               finish=finish,
@@ -872,6 +874,7 @@ class Engine(EngineBase):
                               cache_block_ids=cache_block_ids,
                               req_metrics=req_metrics,
                               logprobs=cur_logprobs,
+                              all_logprobs=all_logprobs,
                               expert_ids=expert_ids)
             outputs[session_id] = out
 
@@ -973,6 +976,7 @@ class Engine(EngineBase):
                                      cache_block_ids=out.cache_block_ids,
                                      req_metrics=out.req_metrics,
                                      expert_ids=out.expert_ids,
+                                     all_logprobs=out.all_logprobs,
                                      logprobs=logprobs))
 
         def __send_resps(step_outputs: List[InferOutput]):

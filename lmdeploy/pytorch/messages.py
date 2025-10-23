@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
-import torch
 from torch import Tensor
 
 from lmdeploy.messages import EngineEvent, EventType, GenerationConfig, LogitsProcessor
@@ -504,7 +503,8 @@ class SchedulerSequence:
     # for debug expert ids
     num_moe_layers: int = None
     num_experts_per_tok: int = None
-    all_experts_ids: Any = None
+    all_experts_ids: Tensor = None
+    all_logprobs: Tensor = None
 
     def __post_init__(self):
         """Post init."""
@@ -521,10 +521,6 @@ class SchedulerSequence:
         if self.output_expert_ids:
             assert self.num_experts_per_tok is not None
             assert self.num_moe_layers is not None
-            self.all_experts_ids = torch.full((0, self.num_moe_layers, self.num_experts_per_tok),
-                                              -1,
-                                              dtype=torch.int32,
-                                              device='cpu')
 
     @property
     def block_size(self) -> int:
@@ -590,6 +586,14 @@ class SchedulerSequence:
     @property
     def output_expert_ids(self):
         return self.num_moe_layers is not None
+
+    @property
+    def logprobs(self):
+        return self.all_logprobs
+
+    @property
+    def output_logprobs(self):
+        return True
 
     @property
     def num_history_ids(self):

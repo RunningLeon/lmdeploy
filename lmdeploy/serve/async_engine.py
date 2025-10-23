@@ -49,6 +49,7 @@ class GenOut:
     cache_block_ids: List[int] = None
 
     expert_ids: torch.Tensor = None
+    all_logprobs: Any = None
 
 
 def _gen_out_to_response(out: GenOut, index) -> Response:
@@ -61,6 +62,7 @@ def _gen_out_to_response(out: GenOut, index) -> Response:
                     last_hidden_state=out.last_hidden_state,
                     logits=out.logits,
                     expert_ids=out.expert_ids,
+                    all_logprobs=out.all_logprobs,
                     index=index)
 
 
@@ -79,6 +81,7 @@ def _append_response(dst: Response, src: Response):
         dst.logprobs = dst.logprobs or []
         dst.logprobs += src.logprobs
     dst.expert_ids = src.expert_ids
+    dst.all_logprobs = src.all_logprobs
     return dst
 
 
@@ -509,9 +512,11 @@ class AsyncEngine(LogitsMixin):
               stream_response: bool = False,
               multiplex: bool = False,
               pbar: Optional[tqdm.tqdm] = None,
+              input_ids=None,
               **kwargs):
 
         prompts = [prompts] if AsyncEngine._is_single(prompts) else prompts
+        all_input_ids = input_ids if input_ids is not None else [None] * len(prompts)
         assert isinstance(prompts, List), 'prompts should be a list'
         gen_config = gen_config or GenerationConfig()
         if not isinstance(gen_config, List):
@@ -520,12 +525,15 @@ class AsyncEngine(LogitsMixin):
                 'input gen_confg length differs from the length of prompts'  # noqa
 
         def requests():
-            for prompt, gen_cfg in zip(prompts, gen_config):
+            for prompt, gen_cfg, input_ids in zip(prompts, gen_config, all_input_ids):
+                if input_ids is not None:
+                    prompt = None
                 r = dict(messages=prompt,
                          gen_config=gen_cfg,
                          do_preprocess=do_preprocess,
                          adapter_name=adapter_name,
                          stream_response=stream_response,
+                         input_ids=input_ids,
                          **kwargs)
                 r.setdefault('sequence_start', True)
                 r.setdefault('sequence_end', True)
@@ -846,6 +854,7 @@ class AsyncEngine(LogitsMixin):
                                  finish_reason,
                                  token_ids=res,
                                  expert_ids=outputs.expert_ids,
+                                 all_logprobs=outputs.all_logprobs,
                                  cache_block_ids=outputs.cache_block_ids)
 
                     if outputs.logprobs is not None:
@@ -894,6 +903,7 @@ class AsyncEngine(LogitsMixin):
                                  logits=logits,
                                  last_hidden_state=last_hidden_state,
                                  expert_ids=outputs.expert_ids,
+                                 all_logprobs=outputs.all_logprobs,
                                  cache_block_ids=outputs.cache_block_ids)
                     # Update a session's sequence only when it is in finished status
                     if outputs.status == ResponseType.FINISH:
@@ -910,6 +920,7 @@ class AsyncEngine(LogitsMixin):
                                  generate_token_len=0,
                                  finish_reason='error',
                                  expert_ids=outputs.expert_ids,
+                                 all_logprobs=outputs.all_logprobs,
                                  token_ids=[])
             # update step
             if sequence_end:

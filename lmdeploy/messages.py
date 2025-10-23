@@ -459,6 +459,7 @@ class Response:
     last_hidden_state: torch.Tensor = None
     index: int = 0
     expert_ids: Any = None
+    all_logprobs: Any = None
 
     def __repr__(self):
         logits = 'logits=None' if self.logits is None else f'logits.shape={self.logits.shape}\nlogits={self.logits}'
@@ -468,6 +469,7 @@ class Response:
         s = (f'text={self.text!r}\ngenerate_token_len={self.generate_token_len}\nfinish_reason="{self.finish_reason}"\n'
              f'token_ids={self.token_ids}\nlog_probs={self.logprobs}\n{logits}\n{hidden_state}')
         s += '\nexpert_ids=None' if self.expert_ids is None else f'\nexpert_ids.shape={self.expert_ids.shape}'
+        s += '\nall_logprobs=None' if self.all_logprobs is None else f'\nall_logprobs.shape={self.all_logprobs.shape}'
         return s
 
 
@@ -550,6 +552,7 @@ class EngineOutput:
     cache_block_ids: Optional[List[int]] = None
     req_metrics: Optional[RequestMetrics] = None
     expert_ids: torch.Tensor = None
+    all_logprobs: torch.Tensor = None
 
 
 @dataclass

@@ -723,11 +723,13 @@ class BaseModelAgent:
             logger.debug(f'<ForwardTask> rank[{rank}]: model forward [{idx}].')
             output = await self._async_model_forward(
                 inputs,
-                return_logits=return_logits,
+                return_logits=True,
                 sync_long_context=sync_long_context,
             )
             logits = output['logits']
             logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
+            all_logprobs = logits.log_softmax(dim=-1)
+
             seq_length = inputs.seq_length
             seq_length = output.get('seq_length', inputs.seq_length)
             last_logits = self._slice_outs(logits, seq_length)  # [bs, 1, prob] -> [bs, prob]
@@ -749,7 +751,13 @@ class BaseModelAgent:
                 # post sampling
                 next_token_ids, extra_inputs = self.agent_strategy.post_sampling(inputs, last_logits, next_token_ids,
                                                                                  extra_inputs)
-
+                # get logprobs
+                indexing_ids = inputs.input_ids.clone().squeeze(0)
+                indexing_ids[:-1] = inputs.input_ids[0, 1:]
+                last_index = inputs.seq_length.cumsum(-1) - 1
+                indexing_ids[last_index] = next_token_ids
+                batch_idx = torch.arange(indexing_ids.size(0), device=indexing_ids.device)
+                extra_inputs.all_logprobs = all_logprobs[batch_idx, indexing_ids].float()
                 with self._broadcast_next_token(next_token_ids, extra_inputs, enable=need_broadcast_next):
                     logger.debug(f'<ForwardTask> rank[{rank}]: synchronize token ids [{idx}]')
 
