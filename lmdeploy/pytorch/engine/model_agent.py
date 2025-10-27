@@ -728,7 +728,6 @@ class BaseModelAgent:
             )
             logits = output['logits']
             logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
-            all_logprobs = logits.log_softmax(dim=-1)
 
             seq_length = inputs.seq_length
             seq_length = output.get('seq_length', inputs.seq_length)
@@ -756,6 +755,7 @@ class BaseModelAgent:
                 indexing_ids[:-1] = inputs.input_ids[0, 1:]
                 last_index = inputs.seq_length.cumsum(-1) - 1
                 indexing_ids[last_index] = next_token_ids
+                all_logprobs = logits.log_softmax(dim=-1)
                 batch_idx = torch.arange(indexing_ids.size(0), device=indexing_ids.device)
                 extra_inputs.all_logprobs = all_logprobs[batch_idx, indexing_ids].float()
                 with self._broadcast_next_token(next_token_ids, extra_inputs, enable=need_broadcast_next):

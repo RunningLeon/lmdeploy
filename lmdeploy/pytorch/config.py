@@ -250,8 +250,8 @@ class ModelConfig:
             override_hf_config(model_config.hf_config, hf_overrides)
 
         # TODO update here later
-        if hasattr(model_config.hf_config, 'num_experts'):
-            model_config.hf_config.cache_expert_ids = True
+        # if hasattr(model_config.hf_config, 'num_experts'):
+        #     model_config.hf_config.cache_expert_ids = True
 
         return model_config
 

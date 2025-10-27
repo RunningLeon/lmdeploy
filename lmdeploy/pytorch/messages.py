@@ -585,6 +585,7 @@ class SchedulerSequence:
 
     @property
     def output_expert_ids(self):
+        return False
         return self.num_moe_layers is not None
 
     @property
