@@ -499,6 +499,10 @@ class SchedulerSequence:
     # For logging
     engine_events: List[EngineEvent] = field(default_factory=list)
 
+    # for router replay
+    output_routed_experts: bool = False
+    all_routed_experts: Tensor = None
+
     def __post_init__(self):
         """Post init."""
         self._seq_meta: SequenceMeta = self.session.seq_meta
@@ -565,6 +569,12 @@ class SchedulerSequence:
         end = self.num_valid_ids
         start = end - self.num_new_tokens
         return self.history_cache._token_ids[start:end]
+
+    @property
+    def routed_experts(self) -> np.ndarray:
+        if not self.output_routed_experts:
+            return None
+        return self.all_routed_experts[:self.num_valid_ids]
 
     @property
     def num_history_ids(self):

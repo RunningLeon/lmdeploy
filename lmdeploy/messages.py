@@ -376,6 +376,7 @@ class PytorchEngineConfig:
     hf_overrides: Optional[Dict[str, Any]] = None
     disable_vision_encoder: bool = False
     logprobs_mode: str = None
+    output_routed_experts: bool = False
 
     # dllm
     dllm_block_length: int = None
@@ -457,14 +458,18 @@ class Response:
     logits: torch.Tensor = None
     last_hidden_state: torch.Tensor = None
     index: int = 0
+    routed_experts: Any = None
 
     def __repr__(self):
         logits = 'logits=None' if self.logits is None else f'logits.shape={self.logits.shape}\nlogits={self.logits}'
         hidden_state = (
             'last_hidden_state=None' if self.last_hidden_state is None else
             f'last_hidden_state.shape={self.last_hidden_state.shape}\nlast_hidden_state={self.last_hidden_state}')
-        s = (f'text={self.text}\ngenerate_token_len={self.generate_token_len}\nfinish_reason="{self.finish_reason}"\n'
-             f'token_ids={self.token_ids}\nlog_probs={self.logprobs}\n{logits}\n{hidden_state}')
+        routed_experts = 'routed_experts=None' if self.routed_experts is None else \
+            f'routed_experts.shape={self.routed_experts.shape}'
+
+        s = (f'text={self.text!r}\ngenerate_token_len={self.generate_token_len}\nfinish_reason="{self.finish_reason}"\n'
+             f'token_ids={self.token_ids}\nlog_probs={self.logprobs}\n{logits}\n{hidden_state}\n{routed_experts}')
         return s
 
 
@@ -546,6 +551,7 @@ class EngineOutput:
     last_hidden_state: torch.Tensor = None
     cache_block_ids: Optional[List[int]] = None
     req_metrics: Optional[RequestMetrics] = None
+    routed_experts: torch.Tensor = None
 
 
 @dataclass

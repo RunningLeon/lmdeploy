@@ -945,10 +945,11 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
             return dict(type='stop')
         return dict(type='abort')
 
-    def create_generate_response_json(res, text, output_ids, logprobs, finish_reason):
+    def create_generate_response_json(res, text, output_ids, logprobs, finish_reason, moe_expert_ids=None):
         meta = GenerateReqMetaOutput(finish_reason=create_finish_reason(finish_reason),
                                      output_token_logprobs=logprobs or None,
                                      prompt_tokens=res.input_token_len,
+                                     moe_expert_ids=moe_expert_ids,
                                      completion_tokens=res.generate_token_len)
         response = GenerateReqOutput(text=text, output_ids=output_ids, meta_info=meta)
         return response.model_dump_json()
@@ -957,11 +958,17 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
         async for res in result_generator:
             text = res.response or ''
             output_ids = res.token_ids
+            moe_expert_ids = res.expert_ids
             logprobs = []
             if res.logprobs:
                 for tok, tok_logprobs in zip(res.token_ids, res.logprobs):
                     logprobs.append((tok_logprobs[tok], tok))
-            response_json = create_generate_response_json(res, text, output_ids, logprobs, res.finish_reason)
+            response_json = create_generate_response_json(res,
+                                                          text,
+                                                          output_ids,
+                                                          logprobs,
+                                                          res.finish_reason,
+                                                          moe_expert_ids=moe_expert_ids)
             yield f'data: {response_json}\n\n'
         yield 'data: [DONE]\n\n'
 
@@ -988,6 +995,7 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
         meta = GenerateReqMetaOutput(finish_reason=create_finish_reason(res.finish_reason),
                                      output_token_logprobs=logprobs or None,
                                      prompt_tokens=res.input_token_len,
+                                     moe_expert_ids=res.expert_ids,
                                      completion_tokens=res.generate_token_len)
         response = GenerateReqOutput(text=text, output_ids=output_ids, meta_info=meta)
 

@@ -56,6 +56,9 @@ class InferOutput:
     # for logging
     req_metrics: RequestMetrics = None
 
+    # expert ids
+    routed_experts: torch.Tensor = None
+
 
 def _tensorlize_block_offsets(block_offsets, dtype=torch.int32):
     """Tensorlize block_offsets."""
@@ -444,7 +447,7 @@ class Engine(EngineBase):
             engine_config (PytorchEngineConfig): Pytorch engine config.
             trust_remote_code (bool): Trust remote code
         """
-        if engine_config is not None and engine_config.enable_mp_engine:
+        if engine_config is not None and engine_config.enable_mp_engine and False:
             from .mp_engine import build_mp_engine
             backend = engine_config.mp_engine_backend
             return build_mp_engine(backend=backend,
@@ -865,13 +868,15 @@ class Engine(EngineBase):
                 cur_logprobs = (logprobs.vals[idx][:num_logprobs + 1], logprobs.indices[idx][:num_logprobs + 1])
 
             req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events)
+            routed_experts = msg.routed_experts if finish else None
             out = InferOutput(session_id=session_id,
                               resp=msg.resp,
                               finish=finish,
                               token_ids=token_ids,
                               cache_block_ids=cache_block_ids,
                               req_metrics=req_metrics,
-                              logprobs=cur_logprobs)
+                              logprobs=cur_logprobs,
+                              routed_experts=routed_experts)
             outputs[session_id] = out
 
             if msg.return_logits:
@@ -964,6 +969,7 @@ class Engine(EngineBase):
                                      logits=out.logits,
                                      cache_block_ids=out.cache_block_ids,
                                      req_metrics=out.req_metrics,
+                                     routed_experts=out.routed_experts,
                                      logprobs=logprobs))
 
         def __update_logprobs(step_outputs: List[InferOutput]):
