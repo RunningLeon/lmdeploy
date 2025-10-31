@@ -84,10 +84,6 @@ class SchedulerSequenceDefault(SchedulerSequence):
 
 class ARSequenceStrategy(SequenceStrategy):
 
-    def __init__(self, model_config: Any):
-        """config."""
-        self.model_config = model_config
-
     def make_sequence(self,
                       seq_id: int,
                       session: 'SchedulerSession',
