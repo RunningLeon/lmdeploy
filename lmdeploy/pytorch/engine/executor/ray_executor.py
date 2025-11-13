@@ -1,21 +1,24 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
+import contextlib
 import json
 import os
-import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import ray
 import ray.exceptions
 import torch
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.backends.selector import init_backend
-from lmdeploy.pytorch.config import BackendConfig, CacheConfig, DistConfig, ModelConfig
+from lmdeploy.pytorch.config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig
 from lmdeploy.pytorch.devices import DeviceContext, get_device_manager
-from lmdeploy.utils import get_logger
+from lmdeploy.pytorch.disagg.conn.protocol import DistServeInitRequest, DistServeKVTransferEndpointInfo
+from lmdeploy.pytorch.disagg.messages import MigrationExecutionBatch
+from lmdeploy.pytorch.ray import RayContext, get_device_str
+from lmdeploy.utils import get_logger, try_import_deeplink
 
 from .base import ExecutorBase
 from .base_worker import WorkerWrapperBase
@@ -23,109 +26,27 @@ from .dist_utils import find_available_port
 
 logger = get_logger('lmdeploy')
 
-PG_WAIT_TIMEOUT = 1800
-
-
-def get_device_str():
-    """get device str."""
-    device_type = get_device_manager().current_context().device_type
-    if device_type == 'cuda':
-        device_type = 'GPU'
-    elif device_type == 'ascend':
-        device_type = 'NPU'
-    else:
-        raise ValueError(f'Unsupported device type: {device_type}')
-
-    return device_type
-
-
-def _wait_until_pg_ready(current_placement_group: 'PlacementGroup'):
-    """Wait until a placement group is ready.
-
-    It prints the informative log messages if the placement group is not created within time.
-    """
-    # copy from vLLM
-    # Wait until PG is ready - this will block until all
-    # requested resources are available, and will timeout
-    # if they cannot be provisioned.
-    placement_group_specs = current_placement_group.bundle_specs
-
-    s = time.time()
-    pg_ready_ref = current_placement_group.ready()
-    wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        ready, _ = ray.wait([pg_ready_ref], timeout=wait_interval)
-        if len(ready) > 0:
-            break
-
-        # Exponential backoff for warning print.
-        wait_interval *= 2
-        logger.info(
-            'Waiting for creating a placement group of specs for '
-            '%d seconds. specs=%s. Check '
-            '`ray status` to see if you have enough resources,'
-            ' and make sure the IP addresses used by ray cluster'
-            ' are the same as VLLM_HOST_IP environment variable'
-            ' specified in each node if you are running on a multi-node.', int(time.time() - s), placement_group_specs)
-
-    try:
-        ray.get(pg_ready_ref, timeout=0)
-    except ray.exceptions.GetTimeoutError:
-        raise ValueError('Cannot provide a placement group of '
-                         f'{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See '
-                         '`ray status` to make sure the cluster has enough resources.') from None
-
-
-def init_ray_cluster(world_size: int, ray_address: str = None):
-    """init ray cluster."""
-    # modifier from vLLM
-    if not ray.is_initialized():
-        ray.init(address=ray_address, ignore_reinit_error=True)
-
-    device_str = get_device_str()
-
-    # Create placement group for worker processes
-    current_placement_group = ray.util.get_current_placement_group()
-    if not current_placement_group:
-        num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
-        if world_size > num_devices_in_cluster:
-            logger.warning(
-                'The number of required %ss exceeds the total '
-                'number of available %ss in the placement group.', device_str, device_str)
-        # Create a new placement group
-        placement_group_specs: List[Dict[str, float]] = ([{device_str: 1.0} for _ in range(world_size)])
-
-        # gcs_addr = ray.get_runtime_context().gcs_address
-        # master_addr = gcs_addr.split(':')[0]
-        # current_ip = master_addr
-        # # This way, at least bundle is required to be created in a current
-        # # node.
-        # placement_group_specs[0][f'node:{current_ip}'] = 0.001
-
-        # By default, Ray packs resources as much as possible.
-        current_placement_group = ray.util.placement_group(placement_group_specs, strategy='PACK')
-        _wait_until_pg_ready(current_placement_group)
-
-    assert current_placement_group is not None
-    # Set the placement group in the parallel config
-    placement_group = current_placement_group
-    return placement_group
-
 
 def _get_master_addr():
-    """get master addr."""
+    """Get master addr."""
+    addr = _envs.dist_master_addr
+    if addr is not None:
+        return addr
     gcs_addr = ray.get_runtime_context().gcs_address
     master_addr = gcs_addr.split(':')[0]
     return master_addr
 
 
 def _get_master_port():
-    """get master port."""
+    """Get master port."""
+    port = _envs.dist_master_port
+    if port is not None:
+        return port
     return find_available_port()
 
 
 def get_ascend_device_rank_mapping(master_addr):
-    rank_table_file = os.environ.get('ASCEND_RANK_TABLE_FILE_PATH')
+    rank_table_file = _envs.ascend_rank_table_file
     if not rank_table_file:
         raise ValueError('ASCEND_RANK_TABLE_FILE_PATH is not set')
     with open(rank_table_file, 'r') as f:
@@ -151,8 +72,78 @@ def get_ascend_device_rank_mapping(master_addr):
     return rank_mapping, worker_ips, envs
 
 
+def _update_env_cuda_alloc_conf(env_vars: Dict):
+    """Update runtime env for CUDA alloc conf."""
+    cuda_alloc_conf = os.getenv('PYTORCH_CUDA_ALLOC_CONF', None)
+    if cuda_alloc_conf is None:
+        return
+
+    # check and update conf, skip expandable_segments
+    cuda_alloc_conf = cuda_alloc_conf.split(',')
+    new_cuda_alloc_conf = []
+    for conf in cuda_alloc_conf:
+        if 'expandable_segments' in conf:
+            if 'True' in conf:
+                logger.warning('"expandable_segments:True" is not supported.')
+            continue
+        new_cuda_alloc_conf.append(conf)
+    if len(new_cuda_alloc_conf) == 0:
+        new_cuda_alloc_conf = ['expandable_segments:False']
+    cuda_alloc_conf = ','.join(new_cuda_alloc_conf)
+
+    # update env_vars
+    env_vars['PYTORCH_CUDA_ALLOC_CONF'] = cuda_alloc_conf
+
+
+def _update_runtime_envs(runtime_env: Dict):
+    """Update runtime envs."""
+    new_envs = _envs.get_all_envs()
+    env_vars: Dict = runtime_env.get('env_vars', {})
+    env_vars.update(new_envs)
+    _update_env_cuda_alloc_conf(env_vars)
+    runtime_env['env_vars'] = env_vars
+    return runtime_env
+
+
+def _update_runtime_env_nsys(runtime_env: Dict):
+    """Update runtime env for nsys."""
+    nsight_env = {
+        't': 'cuda,cudnn,cublas,nvtx',
+        'o': "'worker_process_%p'",
+        'stop-on-exit': 'true',
+    }
+    prefix_path = _envs.ray_nsys_output_prefix
+    if prefix_path is not None:
+        nsight_env['o'] = f'{prefix_path}%p'
+    runtime_env['nsight'] = nsight_env
+    return runtime_env
+
+
+class RemoteLogger:
+    """Remote logger."""
+
+    def __init__(self):
+        self._records = dict()
+        self._next_handle = 0
+
+    def start(self, msg: str):
+        """Start remote log."""
+        record = torch.profiler.record_function(msg)
+        record.__enter__()
+        handle = self._next_handle
+        self._records[handle] = record
+        self._next_handle += 1
+        return handle
+
+    def end(self, handle: int):
+        """End remote log."""
+        record = self._records.pop(handle, None)
+        if record is not None:
+            record.__exit__(None, None, None)
+
+
 class RayWorkerWrapper(WorkerWrapperBase):
-    """worker wrapper."""
+    """Worker wrapper."""
 
     def __init__(
         self,
@@ -160,31 +151,36 @@ class RayWorkerWrapper(WorkerWrapperBase):
         cache_config: CacheConfig,
         backend_config: BackendConfig,
         dist_config: DistConfig,
+        misc_config: MiscConfig,
         adapters: Dict[str, str] = None,
         device_type: str = 'cuda',
         dtype: str = 'auto',
         log_level: int = 30,
     ):
         init_backend(device_type)
+        try_import_deeplink(device_type)
 
-        from lmdeploy.tokenizer import Tokenizer
-        tokenizer = Tokenizer(model_path).model.model
-        model_config = ModelConfig.from_pretrained(model_path, dtype=dtype, dist_config=dist_config)
+        model_config = ModelConfig.from_pretrained(model_path,
+                                                   dtype=dtype,
+                                                   hf_overrides=misc_config.hf_overrides,
+                                                   dist_config=dist_config)
+
         super().__init__(
             model_path=model_path,
             cache_config=cache_config,
             backend_config=backend_config,
             model_config=model_config,
             dist_config=dist_config,
+            misc_config=misc_config,
             adapters=adapters,
             device_type=device_type,
-            tokenizer=tokenizer,
             log_level=log_level,
         )
         self.node_ip = ray.util.get_node_ip_address()
+        self._remote_logger = RemoteLogger()
 
     def set_device(self, local_rank):
-        """set worker local rank."""
+        """Set worker local rank."""
         torch.cuda.set_device(local_rank)
 
     def set_env(self, envs: Dict[str, str]):
@@ -192,7 +188,7 @@ class RayWorkerWrapper(WorkerWrapperBase):
             os.environ[key] = value
 
     def get_node_ip(self):
-        """get worker ip."""
+        """Get worker ip."""
         return self.node_ip
 
     def warmup_dist(self):
@@ -207,19 +203,24 @@ class RayWorkerWrapper(WorkerWrapperBase):
             all_reduce(tmp)
 
     def pack_output(self, output: Dict):
-        """pack output."""
-        for k, v in output.items():
-            if isinstance(v, torch.Tensor):
-                output[k] = v.numpy()
-        return output
+        """Pack output."""
+        return output.to_numpy()
+
+    def remote_log_start(self, msg: str):
+        """Remote log start."""
+        return self._remote_logger.start(msg)
+
+    def remote_log_end(self, handle: int):
+        """Remote log end."""
+        return self._remote_logger.end(handle)
 
     def exit(self):
-        """exit actor."""
+        """Exit actor."""
         ray.actor.exit_actor()
 
 
 class RayExecutor(ExecutorBase):
-    """ray executor."""
+    """Ray executor."""
 
     def __init__(self,
                  model_path: str,
@@ -227,17 +228,17 @@ class RayExecutor(ExecutorBase):
                  cache_config: CacheConfig,
                  backend_config: BackendConfig,
                  dist_config: DistConfig,
-                 tokenizer: Any,
+                 misc_config: MiscConfig,
                  adapters: Dict[str, str] = None,
                  device_type: str = 'cuda',
                  dtype: str = 'auto'):
-        """initialize Executor."""
+        """Initialize Executor."""
         super().__init__(model_path=model_path,
                          model_config=model_config,
                          cache_config=cache_config,
                          backend_config=backend_config,
                          dist_config=dist_config,
-                         tokenizer=tokenizer,
+                         misc_config=misc_config,
                          adapters=adapters,
                          device_type=device_type)
 
@@ -248,15 +249,16 @@ class RayExecutor(ExecutorBase):
             ray_world_size = self.world_size
             if self.dp > 1:
                 ray_world_size = 1
-            placement_group = init_ray_cluster(ray_world_size)
+            self.ray_ctx = RayContext(ray_world_size, dp=dist_config.dp, device_type=device_type)
+            placement_group = self.ray_ctx.get_placement_group()
             self.placement_group = placement_group
 
             if self.dp == 1:
                 self.master_addr = _get_master_addr()
                 self.master_port = _get_master_port()
             else:
-                self.master_addr = os.environ.get('LMDEPLOY_DP_MASTER_ADDR', None)
-                self.master_port = os.environ.get('LMDEPLOY_DP_MASTER_PORT', None)
+                self.master_addr = _envs.dp_master_addr
+                self.master_port = _envs.dp_master_port
                 if self.master_addr is None or self.master_port is None:
                     raise RuntimeError('DP > 1 requires "LMDEPLOY_DP_MASTER_ADDR" and "LMDEPLOY_DP_MASTER_PORT".')
 
@@ -266,6 +268,7 @@ class RayExecutor(ExecutorBase):
                 cache_config=cache_config,
                 backend_config=backend_config,
                 dist_config=dist_config,
+                misc_config=misc_config,
                 adapters=adapters,
                 device_type=device_type,
                 dtype=dtype,
@@ -299,7 +302,7 @@ class RayExecutor(ExecutorBase):
                        args: Tuple[Any] = None,
                        kwargs: Dict[str, Any] = None,
                        timeout: float = None):
-        """collective rpc."""
+        """Collective rpc."""
         if args is None:
             args = list()
         if kwargs is None:
@@ -307,35 +310,49 @@ class RayExecutor(ExecutorBase):
         return ray.get([getattr(worker, method).remote(*args, **kwargs) for worker in self.workers], timeout=timeout)
 
     def build_model(self):
-        """build model."""
+        """Build model."""
         self.collective_rpc('build_model')
 
     def gather_free_mem(self):
-        """gather available memory."""
+        """Gather available memory."""
         return self.collective_rpc('get_free_mem')
 
     def set_cache_config(self, cache_config: CacheConfig):
-        """set all cache config."""
+        """Set all cache config."""
         self.collective_rpc('set_cache_config', (cache_config, ))
 
     def set_model_config(self, model_config: ModelConfig):
-        """set all model config."""
+        """Set all model config."""
         self.collective_rpc('set_model_config', (model_config, ))
 
     def build_graph_runner(self):
-        """build graph runner."""
+        """Build graph runner."""
         self.collective_rpc('build_graph_runner')
 
     def build_cache_engine(self):
-        """build cache engine."""
+        """Build cache engine."""
         self.collective_rpc('build_cache_engine')
 
+    def update_params(self, request: Any):
+        """Update params."""
+        self.collective_rpc('update_params', (request, ))
+
     def warmup(self):
-        """build cache engine."""
+        """Build cache engine."""
         self.collective_rpc('warmup')
 
+    def sleep(self, level: int = 1):
+        """Sleep."""
+        self.collective_rpc('sleep', (level, ))
+
+    def wakeup(self, tags: Optional[List[str]] = None):
+        """Wakeup."""
+        if tags is None or 'kv_cache' in tags:
+            self.update_configs()
+        self.collective_rpc('wakeup', (tags, ))
+
     def get_input_processor(self):
-        """build cache engine."""
+        """Build cache engine."""
         return ray.get(self.workers[0].get_input_processor.remote())
 
     async def _prefetch_outputs(self):
@@ -343,10 +360,7 @@ class RayExecutor(ExecutorBase):
             outs = await self.workers[0].get_outputs.remote()
             logger.debug(f'Receive {len(outs)} outputs from worker[0].')
             for out in outs:
-                # pack pytorch
-                for k, v in out.items():
-                    if isinstance(v, np.ndarray):
-                        out[k] = torch.from_numpy(v)
+                out = out.to_tensor()
                 self.remote_outs.put_nowait(out)
 
     def _prefetch_task_callback(self, task: asyncio.Task):
@@ -357,21 +371,21 @@ class RayExecutor(ExecutorBase):
         except KeyboardInterrupt:
             logger.debug(f'{task.get_name()} KeyboardInterrupt.')
         except BaseException:
-            logger.exception(f'{task.get_name()} task failed.')
+            logger.debug(f'{task.get_name()} task failed.')
 
     def start(self, forward_event: asyncio.Event):
-        """start engine loop."""
+        """Start engine loop."""
         self.forward_event = forward_event
         self.collective_rpc('start')
 
         self.remote_outs = asyncio.Queue()
         event_loop = asyncio.get_event_loop()
         logger.info('Starting async task RayPrefetchOutput loop.')
-        self._prefetch_task = event_loop.create_task(self._prefetch_outputs())
+        self._prefetch_task = event_loop.create_task(self._prefetch_outputs(), name='RayExecutorPrefetchOutput')
         self._prefetch_task.add_done_callback(self._prefetch_task_callback)
 
     def stop(self):
-        """stop engine loop."""
+        """Stop engine loop."""
         if self.dp == 1:
             self.collective_rpc('stop_async')
             logger.debug('RayExecutor workers stopped.')
@@ -380,26 +394,23 @@ class RayExecutor(ExecutorBase):
 
     def release(self):
         """release."""
+        if _envs.ray_timeline_enable:
+            ray.timeline(_envs.ray_timeline_output_path)
+
         if self.dp == 1:
             try:
                 self.collective_rpc('release', timeout=5.0)
                 logger.debug('RayExecutor workers released.')
             except ray.exceptions.GetTimeoutError:
-                logger.info('Ray release timeout.')
-
-            try:
-                self.collective_rpc('exit')
-                logger.debug('RayExecutor workers exited.')
-            except ray.exceptions.RayActorError as e:
-                logger.debug(f'ray actor exit: {e}')
+                logger.info('Ray release timeout, killing workers')
+                [ray.kill(worker) for worker in self.workers]
         else:
             [ray.kill(worker) for worker in self.workers]
 
-        ray.util.remove_placement_group(self.placement_group)
-        logger.debug('RayExecutor placement group removed.')
+        self.ray_ctx.shutdown()
 
     def _compile_dag(self):
-        """compile dag."""
+        """Compile dag."""
         from ray.dag.input_node import InputNode
         from ray.dag.output_node import MultiOutputNode
         with InputNode() as input_data:
@@ -409,21 +420,32 @@ class RayExecutor(ExecutorBase):
         return output
 
     async def forward_async(self, inputs):
-        """start forward."""
+        """Start forward."""
         # we don't need return of forward async
         if self.dag is None:
             self.dag = self._compile_dag()
         inputs = ray.put(inputs)
-        ray.get(self.dag.execute(inputs))
+        # make sure in order
+        outs = self.dag.execute(inputs)
+        ray.get(outs)
 
     async def get_output_async(self):
-        """get output async."""
-        if self.remote_outs.qsize() > 0:
-            return self.remote_outs.get_nowait()
+        """Get output async."""
         return await self.remote_outs.get()
 
+    @contextlib.contextmanager
+    def remote_log(self, msg: str):
+        """Send log for debugging.
+
+        Do not use it in production.
+        """
+        handle_ref = self.workers[0].remote_log_start.remote(msg)
+        yield
+        handle = ray.get(handle_ref)
+        ray.get(self.workers[0].remote_log_end.remote(handle))
+
     def _sort_workers(self, driver_ip: str, workers: List[RayWorkerWrapper]):
-        """sort workers by ip."""
+        """Sort workers by ip."""
         worker_ips = ray.get([worker.get_node_ip.remote() for worker in workers])
 
         ip_counts: Dict[str, int] = {}
@@ -474,12 +496,19 @@ class RayExecutor(ExecutorBase):
         sorted_workers = [item[0] for item in sorted_worker_ip_map]
         return sorted_workers
 
+    def _valid_bundle_id(self, bundle_id: int):
+        """Check if a bundle is valid only when self.use_external_ray=True."""
+        if (not self.ray_ctx.owned_pg and _envs.ray_external_pg_bundles
+                and bundle_id not in _envs.ray_external_pg_bundles):
+            return False
+        return True
+
     def _init_workers_ray(self, placement_group: PlacementGroup, worker_kwargs: dict):
-        """init worker ray."""
+        """Init worker ray."""
         device_str = get_device_str()
         bundle_indices = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if bundle.get(device_str, 0):
+            if bundle.get(device_str, 0) and self._valid_bundle_id(bundle_id):
                 bundle_indices.append(bundle_id)
         bundle_indices = bundle_indices[:self.world_size]
 
@@ -492,30 +521,76 @@ class RayExecutor(ExecutorBase):
             )
 
             if device_str == 'GPU':
+                runtime_env = dict()
+                runtime_env = _update_runtime_envs(runtime_env)
+                if _envs.ray_nsys_enable:
+                    runtime_env = _update_runtime_env_nsys(runtime_env)
                 worker = ray.remote(
                     num_cpus=0,
-                    num_gpus=1.0,
+                    num_gpus=0.01,
                     scheduling_strategy=scheduling_strategy,
+                    runtime_env=runtime_env,
                 )(RayWorkerWrapper).remote(**worker_kwargs)
             else:
                 worker = ray.remote(
                     num_cpus=0,
                     num_gpus=0,
-                    resources={device_str: 1.0},
+                    resources={device_str: 0.01},
                     scheduling_strategy=scheduling_strategy,
                 )(RayWorkerWrapper).remote(**worker_kwargs)
             workers.append(worker)
         return workers
 
     def _init_distributed_environment_by_device(self, device_str: str):
-        """init distributed environment."""
+        """Init distributed environment."""
         driver_ip = _get_master_addr()
-        if device_str == 'cuda':
+        if device_str in ['cuda', 'maca']:
             self.workers = self._sort_workers(driver_ip, self.workers)
+
         elif device_str == 'ascend':
+            self._init_ascend_distributed_environment(driver_ip)
+        elif device_str == 'camb':
+            self._init_camb_distributed_environment(driver_ip)
+        else:
+            raise ValueError(f'Unsupported device type: {device_str}')
+
+    def _init_ascend_distributed_environment(self, driver_ip):
+        """Init ascend distributed environment."""
+        rank_table_file = _envs.ascend_rank_table_file
+        set_rt_visable_devices_by_ray = _envs.ascend_set_rt_visable_devices_by_ray
+
+        if rank_table_file:
+            # if rank table file is set, use it to get rank mapping, multiple nodes
             rank_mapping, worker_ips, envs = get_ascend_device_rank_mapping(driver_ip)
             self.workers = self._sort_workers_by_ip(worker_ips, self.workers)
             ray.get([worker.set_device.remote(rank_mapping[idx]) for idx, worker in enumerate(self.workers)])
             ray.get([worker.set_env.remote(envs) for worker in self.workers])
+        elif not set_rt_visable_devices_by_ray:
+            # if rank table file is not set, treat as single node
+            # simply set device by index, this is for single node, multiple devices
+            self.workers = self._sort_workers(driver_ip, self.workers)
+            ray.get([worker.set_device.remote(idx) for idx, worker in enumerate(self.workers)])
         else:
-            raise ValueError(f'Unsupported device type: {device_str}')
+            self.workers = self._sort_workers(driver_ip, self.workers)
+
+    def _init_camb_distributed_environment(self, driver_ip):
+        self.workers = self._sort_workers(driver_ip, self.workers)
+        ray.get([worker.set_device.remote(idx) for idx, worker in enumerate(self.workers)])
+
+    """ PD Disaggregation API Begin """
+
+    def p2p_initialize(self, init_request: DistServeInitRequest):
+        return self.collective_rpc('p2p_initialize', (init_request, ))
+
+    def p2p_connect(self, remote_engine_id: str, conn_request: List[DistServeKVTransferEndpointInfo]):
+        """Rdma connect."""
+        return self.collective_rpc('p2p_connect', (
+            remote_engine_id,
+            conn_request,
+        ))
+
+    async def migrate(self, batch: MigrationExecutionBatch):
+        jobs = (worker.migrate.remote(batch) for worker in self.workers)
+        return await asyncio.gather(*jobs)
+
+    """ PD Disaggregation API Begin """

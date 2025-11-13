@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import contextlib
 import importlib
 import inspect
 import os.path as osp
@@ -9,8 +10,8 @@ from typing import Any, Dict
 
 import torch
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_utils import load_state_dict
 
+from lmdeploy.pytorch.model_inputs import BuildModelContext, StepContextManager
 from lmdeploy.utils import get_logger
 
 from ..config import ModelConfig
@@ -21,7 +22,7 @@ logger = get_logger('lmdeploy')
 
 
 def _get_rewrite_qualname(origin_qualname: str, module_map: Dict[str, str]) -> str:
-    """get rewrite module from origin module name.
+    """Get rewrite module from origin module name.
 
     Args:
         origin_qualname (str): The origin qualname of the module.
@@ -58,7 +59,7 @@ def _class_from_qualname(qualname: str) -> Any:
 
 
 def _find_rewrite_module_qualname(model, module_map: Dict[str, str]):
-    """find rewrite module."""
+    """Find rewrite module."""
     module_name = inspect.getmodule(model).__name__
     class_name = model.__class__.__name__
 
@@ -93,7 +94,7 @@ def _find_rewrite_module_qualname(model, module_map: Dict[str, str]):
 
 
 def get_rewrite_cls(model: torch.nn.Module, module_map: Dict[str, str] = None):
-    """get rewrite cls."""
+    """Get rewrite cls."""
     if module_map is None:
         module_map = _get_module_map()
     rewrite_qualname = _find_rewrite_module_qualname(model, module_map=module_map)
@@ -103,7 +104,7 @@ def get_rewrite_cls(model: torch.nn.Module, module_map: Dict[str, str] = None):
 
 
 def _get_module_map():
-    """get module map."""
+    """Get module map."""
     module_map = MODULE_MAP.copy()
     device_type = get_device_manager().current_context().device_type
     if device_type != 'cuda':
@@ -115,7 +116,7 @@ def _get_module_map():
 
 
 def update_custom_module_map(module_map_path: str):
-    """moad custom module map from file."""
+    """Moad custom module map from file."""
     from importlib.machinery import SourceFileLoader
 
     from lmdeploy.pytorch.models.module_map import LMDEPLOY_PYTORCH_MODEL_PATH
@@ -153,7 +154,7 @@ def update_custom_module_map(module_map_path: str):
 
 
 def _get_model_class(config, module_map):
-    """get model class."""
+    """Get model class."""
     auto_map = getattr(config, 'auto_map', dict())
     if 'AutoModelForCausalLM' in auto_map:
         mapname = auto_map['AutoModelForCausalLM']
@@ -184,24 +185,51 @@ def _get_model_class(config, module_map):
     raise RuntimeError(f'Can not found rewrite for architectures: {architectures}')
 
 
-def build_model_from_hf_config(model_config: PretrainedConfig, dtype: torch.dtype = None, device: torch.device = None):
-    """build model from hf config."""
-    from lmdeploy.pytorch.model_inputs import StepContextManager
-    ctx_mgr = StepContextManager()
+def build_model_from_hf_config(model_config: PretrainedConfig,
+                               dtype: torch.dtype = None,
+                               device: torch.device = None,
+                               ctx_mgr: StepContextManager = None,
+                               build_model_ctx: 'BuildModelContext' = None):
+    """Build model from hf config."""
+    if ctx_mgr is None:
+        ctx_mgr = StepContextManager(build_model_ctx)
     module_map = _get_module_map()
     if device is None:
         device = torch.device('cuda')
     model_cls = _get_model_class(model_config, module_map)
-    model = model_cls(model_config, ctx_mgr, dtype=dtype, device=device)
+    with build_model_context(build_model_ctx):
+        model = model_cls(model_config, ctx_mgr, dtype=dtype, device=device)
     return model.eval()
 
 
+def _patch_quantization_config(model_config: PretrainedConfig, model_format: str):
+    """Patch quantization config."""
+    if model_format is None:
+        return
+
+    if hasattr(model_config, 'quantization_config'):
+        logger.warning('Can not perform weight quantization on quantized model.')
+        return
+
+    if model_format == 'fp8':
+        logger.debug('Patch quantization config for fp8.')
+        quantization_config = dict(quant_method='fp8', fmt='e4m3', weight_block_size=[128, 128])
+    else:
+        raise RuntimeError(f'Unsupported weight quantization method: {model_format}')
+    model_config.quantization_config = quantization_config
+
+
 @torch.inference_mode()
-def build_patched_model(config: ModelConfig, device: torch.device = None):
-    """build patched model."""
+def build_patched_model(config: ModelConfig,
+                        device: torch.device = None,
+                        model_format: str = None,
+                        build_model_ctx: 'BuildModelContext' = None):
+    """Build patched model."""
     model_config = config.hf_config
+    llm_config = config.llm_config
+    _patch_quantization_config(llm_config, model_format)
     dtype = config.dtype
-    return build_model_from_hf_config(model_config, dtype=dtype, device=device)
+    return build_model_from_hf_config(model_config, dtype=dtype, device=device, build_model_ctx=build_model_ctx)
 
 
 @torch.inference_mode()
@@ -209,9 +237,10 @@ def add_adapters(model: torch.nn.Module,
                  adapters: Dict[str, str],
                  dtype: torch.dtype = torch.float16,
                  device: torch.device = None):
-    """add adapters."""
+    """Add adapters."""
     from peft import PeftConfig
     from peft.tuners.lora import LoraConfig
+    from transformers.modeling_utils import load_state_dict
 
     from lmdeploy.pytorch.adapter.adapter import find_all_target, get_ranks_and_scalings, load_lora_weights
     from lmdeploy.pytorch.nn.linear import LoRA
@@ -303,3 +332,23 @@ def add_adapters(model: torch.nn.Module,
             load_lora_weights(model, state_dict.items(), adapter_id=adapter_id)
 
     return target_infos
+
+
+BUILD_MODEL_CTX = BuildModelContext()
+
+
+@contextlib.contextmanager
+def build_model_context(ctx: BuildModelContext):
+    """Context manager for building model."""
+    global BUILD_MODEL_CTX
+    old_ctx = BUILD_MODEL_CTX
+    ctx = ctx or old_ctx
+    BUILD_MODEL_CTX = ctx
+    yield
+    BUILD_MODEL_CTX = old_ctx
+
+
+def get_build_model_context() -> BuildModelContext:
+    """Get build model context."""
+    global BUILD_MODEL_CTX
+    return BUILD_MODEL_CTX

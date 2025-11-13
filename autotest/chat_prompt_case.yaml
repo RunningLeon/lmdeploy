@@ -1,7 +1,5 @@
 base_testcase:
-    - 你好，你叫什么名字#hi, what's your name:
-    - end:
-    - 简要介绍乌鲁木齐的景点#A brief introduction to Urumqi’s attractions:
+    - 乌鲁木齐的景点A brief introduction to Urumqi’s attractions:
         - contain:
             - urumqi
             - 乌鲁木齐

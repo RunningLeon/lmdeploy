@@ -8,34 +8,32 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from .triton_utils import get_kernel_meta, wrap_jit_func
-
 assert triton.__version__ >= '2.1.0'
 
-LOG2: tl.constexpr = math.log(2)
+LOG2 = tl.constexpr(math.log(2))
 
 
 @triton.jit
 def tl_pow(a, b):
-    """triton pow."""
+    """Triton pow."""
     return tl.exp(b * tl.log(a))
 
 
 @triton.jit
 def tl_2pow(b):
-    """triton pow2."""
+    """Triton pow2."""
     return tl.exp(b * LOG2)
 
 
 @triton.jit
 def tl_log2(a):
-    """triton log2."""
+    """Triton log2."""
     return tl.log(a) / LOG2
 
 
 @triton.jit
 def _get_interleave_power_of_2(i, n):
-    """get interleave power of 2."""
+    """Get interleave power of 2."""
     start = -tl_2pow(3 - tl_log2(n))
     start = tl_2pow(start)
     ratio = start
@@ -44,7 +42,7 @@ def _get_interleave_power_of_2(i, n):
 
 @triton.jit
 def get_slope(i, n):
-    """get slope."""
+    """Get slope."""
     closest_power_of_2 = tl_2pow(tl_log2(n).to(tl.int32))
     if i < closest_power_of_2:
         return _get_interleave_power_of_2(i, closest_power_of_2)
@@ -65,7 +63,6 @@ def _load_block_offsets(offset_ptr, block_id, num_sub_blocks: tl.constexpr, BLOC
         return tl.load(offset_ptr + block_id) * BLOCK + offs_n
 
 
-@wrap_jit_func
 @triton.jit
 def _fwd_split_kernel(
     Q,
@@ -98,7 +95,7 @@ def _fwd_split_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """first step kernel of split k attention."""
+    """First step kernel of split k attention."""
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     split_k_id = tl.program_id(2)
@@ -200,7 +197,6 @@ def _fwd_split_kernel(
     tl.store(Acc_out + off_meta + 1 + tl.arange(0, 1), l_i)
 
 
-@wrap_jit_func
 @triton.jit
 def _reduce_split_kernel(
     Acc,
@@ -215,7 +211,7 @@ def _reduce_split_kernel(
     SPLIT_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    """second step kernel of split k attention."""
+    """Second step kernel of split k attention."""
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
@@ -244,7 +240,6 @@ def _reduce_split_kernel(
     tl.store(Out + out_offs, acc)
 
 
-@wrap_jit_func
 @triton.jit
 def _fwd_kernel(
     Q,
@@ -278,7 +273,7 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """forward kernel."""
+    """Forward kernel."""
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     start_m = tl.program_id(2)
@@ -375,7 +370,6 @@ def _fwd_kernel(
     tl.store(out_ptrs, acc, mask=offs_m[:, None] < cur_batch_seq_len)
 
 
-@wrap_jit_func
 @triton.jit
 def _fwd_split_kernel_quant(
     Q,
@@ -417,7 +411,7 @@ def _fwd_split_kernel_quant(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """first step kernel of split k attention with dequant fused.
+    """First step kernel of split k attention with dequant fused.
 
     Args:
         stride_xbs: stride of block size dim
@@ -561,7 +555,6 @@ def _fwd_split_kernel_quant(
     tl.store(Acc_out + off_meta + 1 + tl.arange(0, 1), l_i)
 
 
-@wrap_jit_func
 @triton.jit
 def _fwd_kernel_quant(
     Q,
@@ -604,7 +597,7 @@ def _fwd_kernel_quant(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """forward kernel with dequant fused.
+    """Forward kernel with dequant fused.
 
     Args:
         stride_xbs: stride of block size dim
@@ -802,7 +795,6 @@ def alibi_paged_attention_fwd(
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
 
     num_warps = 4 if Lq <= 64 else 8
-    kernel_meta = get_kernel_meta(q)
     is_decoding = q.shape[-3] == b_seq_len.size(0)
     if not is_decoding:
         if quant_policy > 0:
@@ -846,8 +838,7 @@ def alibi_paged_attention_fwd(
                                     BLOCK_DMODEL=Lq,
                                     BLOCK_N=BLOCK,
                                     num_warps=num_warps,
-                                    num_stages=1,
-                                    **kernel_meta)
+                                    num_stages=1)
         else:
             _fwd_kernel[grid](q,
                               k,
@@ -880,8 +871,7 @@ def alibi_paged_attention_fwd(
                               BLOCK_DMODEL=Lq,
                               BLOCK_N=BLOCK,
                               num_warps=num_warps,
-                              num_stages=1,
-                              **kernel_meta)
+                              num_stages=1)
     else:
         SPLIT_K = 4
         grid = (batch, head, SPLIT_K)
@@ -927,8 +917,7 @@ def alibi_paged_attention_fwd(
                                           BLOCK_DMODEL=Lq,
                                           BLOCK_N=BLOCK,
                                           num_warps=4,
-                                          num_stages=1,
-                                          **kernel_meta)
+                                          num_stages=1)
 
         else:
             _fwd_split_kernel[grid](q,
@@ -961,8 +950,7 @@ def alibi_paged_attention_fwd(
                                     BLOCK_DMODEL=Lq,
                                     BLOCK_N=BLOCK,
                                     num_warps=4,
-                                    num_stages=1,
-                                    **kernel_meta)
+                                    num_stages=1)
 
         grid = (batch, head)
         _reduce_split_kernel[grid](acc,
@@ -977,5 +965,4 @@ def alibi_paged_attention_fwd(
                                    SPLIT_K=SPLIT_K,
                                    BLOCK_DMODEL=Lq,
                                    num_warps=num_warps,
-                                   num_stages=1,
-                                   **kernel_meta)
+                                   num_stages=1)

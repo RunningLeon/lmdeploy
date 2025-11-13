@@ -2,8 +2,8 @@
 
 #pragma once
 
+#include "src/turbomind/core/allocator.h"
 #include "src/turbomind/models/llama/Barrier.h"
-#include "src/turbomind/utils/allocator.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include "src/turbomind/utils/logger.h"
 #include <algorithm>
@@ -73,7 +73,7 @@ size_t GetSyncFreeMemSize(Barrier& barrier, std::atomic<size_t>& value);
 class BlockManager {
 public:
     explicit BlockManager(
-        size_t block_size, double block_count, int chunk_size, IAllocator* allocator, GetFreeMemSize get_free_size);
+        size_t block_size, double block_count, int chunk_size, core::Allocator allocator, GetFreeMemSize get_free_size);
 
     ~BlockManager();
 
@@ -104,6 +104,11 @@ public:
         return max_block_count_;
     }
 
+    int total_count() const noexcept
+    {
+        return blocks_.size();
+    }
+
     int active_count() const noexcept
     {
         return active_ids_.size();
@@ -116,7 +121,7 @@ public:
 
     int free_count() const noexcept
     {
-        return (max_block_count_ - blocks_.size()) + free_ids_.size();
+        return free_ids_.size();
     }
 
     Block& block(int idx)
@@ -141,10 +146,11 @@ private:
     bool Malloc();
 
 private:
-    size_t      block_size_;
-    int         max_block_count_{};
-    int         chunk_size_{};
-    IAllocator* allocator_;
+    size_t block_size_;
+    int    max_block_count_{};
+    int    chunk_size_{};
+
+    core::Allocator allocator_;
 
     std::vector<void*> chunks_;
 

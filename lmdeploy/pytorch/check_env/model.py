@@ -5,7 +5,7 @@ from .base import BaseChecker
 
 
 class ModelChecker(BaseChecker):
-    """check model is available."""
+    """Check model is available."""
 
     def __init__(self, model_path: str, trust_remote_code: bool, dtype: str, device_type: str, logger=None) -> None:
         super().__init__(logger=logger)
@@ -15,7 +15,7 @@ class ModelChecker(BaseChecker):
         self.dtype = dtype
 
     def check_config(self, trans_version):
-        """check config."""
+        """Check config."""
         model_path = self.model_path
         trust_remote_code = self.trust_remote_code
         try:
@@ -29,21 +29,20 @@ class ModelChecker(BaseChecker):
         return config
 
     def check_trans_version(self, config, trans_version):
-        """check transformers version."""
+        """Check transformers version."""
         model_path = self.model_path
-        try:
-            model_trans_version = getattr(config, 'transformers_version', None)
-            if model_trans_version is not None:
-                model_trans_version = version.parse(model_trans_version)
-                assert trans_version >= model_trans_version, ('Version mismatch.')
-        except Exception as e:
-            message = (f'model `{model_path}` requires '
-                       f'transformers version {model_trans_version} '
-                       f'but transformers {trans_version} is installed.')
-            self.log_and_exit(e, 'transformers', message=message)
+        logger = self.get_logger()
+        model_trans_version = getattr(config, 'transformers_version', None)
+        if model_trans_version is not None:
+            model_trans_version = version.parse(model_trans_version)
+            if trans_version < model_trans_version:
+                message = (f'model `{model_path}` requires '
+                           f'transformers version {model_trans_version} '
+                           f'but transformers {trans_version} is installed.')
+                logger.warning(message)
 
     def check_dtype(self, config):
-        """check dtype."""
+        """Check dtype."""
         logger = self.get_logger()
         model_path = self.model_path
         device_type = self.device_type
@@ -58,7 +57,13 @@ class ModelChecker(BaseChecker):
                 if not is_bf16_supported(device_type):
                     logger.warning('Device does not support bfloat16.')
         except Exception as e:
-            message = (f'Checking failed with error {e}', 'Please send issue to LMDeploy with error logs.')
+            message = (f'Checking failed with error {e}. Please send issue to LMDeploy with error logs.')
+            self.log_and_exit(e, 'Model', message=message)
+
+        try:
+            model_config.check_env_func(device_type)
+        except Exception as e:
+            message = (f'Checking failed with error {e}.')
             self.log_and_exit(e, 'Model', message=message)
 
     def check(self):

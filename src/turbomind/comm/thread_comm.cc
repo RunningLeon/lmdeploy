@@ -2,61 +2,57 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstddef>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <new>
 
+#include "src/turbomind/comm/barrier.h"
 #include "src/turbomind/comm/host_comm.h"
-
-#include "src/turbomind/utils/Tensor.h"
-#include "src/turbomind/utils/cuda_utils.h"
-
+#include "src/turbomind/core/check.h"
+#include "src/turbomind/core/data_type.h"
 namespace turbomind::comm {
 
 struct ThreadCommImpl: public HostCommImpl {
 
     class State {
     public:
-        explicit State(int n): n_{n}, channels_(n * n) {}
+        explicit State(int n): n_{n}, channels_(n * n), barrier_{n} {}
+
         std::atomic<void*>& channel(int from, int to)
         {
             return channels_[from * n_ + to];
         }
 
+        void sync()
+        {
+            barrier_.arrive_and_wait();
+        }
+
     private:
         int                            n_;
         std::deque<std::atomic<void*>> channels_;
+        Barrier                        barrier_;
     };
 
     std::shared_ptr<State> state_;
 
-    int rank_;  // global rank
+    int n_ranks_;
+    int rank_;
 
-    std::vector<int> l2g_;
-    std::vector<int> g2l_;
-
-    ThreadCommImpl(int n_ranks, std::shared_ptr<State> state, int rank): state_{std::move(state)}, rank_{rank}
-    {
-        l2g_.resize(n_ranks);
-        std::iota(l2g_.begin(), l2g_.end(), 0);
-        g2l_ = l2g_;
-    }
-
-    ThreadCommImpl(std::vector<int> l2g, std::vector<int> g2l, std::shared_ptr<State> state, int rank):
-        state_{std::move(state)}, rank_{rank}, l2g_{std::move(l2g)}, g2l_{std::move(g2l)}
+    ThreadCommImpl(int n_ranks, std::shared_ptr<State> state, int rank):
+        state_{std::move(state)}, n_ranks_{n_ranks}, rank_{rank}
     {
     }
 
     int rank() const override
     {
-        return g2l_.at(rank_);
+        return rank_;
     }
 
     int n_ranks() const override
     {
-        return l2g_.size();
+        return n_ranks_;
     }
 
     bool is_same_process() const override
@@ -71,38 +67,51 @@ struct ThreadCommImpl: public HostCommImpl {
 
     std::shared_ptr<HostCommImpl> Split(int color, int key) override
     {
-        FT_CHECK(color >= 0);
-        FT_CHECK(g2l_[rank_] >= 0);
+        TM_CHECK(color >= 0);
 
-        // `g2l_[rank_]` imposes proper ordering when keys are equal
-        auto vec = comm::AllGather(this, std::make_tuple(color, key, g2l_[rank_]));
+        auto ranks = comm::AllGather(this, std::make_tuple(color, key, rank_));
 
-        auto last = std::stable_partition(vec.begin(), vec.end(), [&](auto x) {  //
-            return std::get<0>(x) == color;
-        });
-        vec.erase(last, vec.end());
-        std::stable_sort(vec.begin(), vec.end(), [](auto& a, auto& b) {  //
-            return a < b;
-        });
+        auto same_color = [&](auto x) { return std::get<0>(x) == color; };
+        ranks.erase(std::stable_partition(ranks.begin(), ranks.end(), same_color), ranks.end());
 
-        std::vector<int> l2g;
-        std::vector<int> g2l(g2l_.size(), -1);
+        std::stable_sort(ranks.begin(), ranks.end(), [](auto& a, auto& b) { return a < b; });
 
-        for (size_t i = 0; i < vec.size(); ++i) {
-            int r = l2g_.at(std::get<2>(vec[i]));
-            l2g.push_back(r);
-            g2l[r] = i;
+        std::shared_ptr<State> state;
+
+        int rank = -1;
+        for (int i = 0; i < ranks.size(); ++i) {
+            if (std::get<2>(ranks[i]) == rank_) {
+                rank = i;
+            }
         }
 
-        return std::make_shared<ThreadCommImpl>(std::move(l2g), std::move(g2l), state_, rank_);
+        TM_CHECK_GE(rank, 0);
+
+        if (rank == 0) {
+            state = std::make_shared<State>(ranks.size());
+        }
+
+        auto states = comm::AllGather(this, state);
+        if (rank != 0) {
+            const int root = std::get<2>(ranks[0]);
+            state          = states[root];
+        }
+
+        return std::make_shared<ThreadCommImpl>(ranks.size(), state, rank);
     }
 
-    void Sync() override
+    void Sync(bool blocking) override
     {
-        if (n_ranks() == 1) {
+        if (n_ranks_ == 1) {
             return;
         }
-        for (const auto& r : l2g_) {
+
+        if (blocking) {
+            state_->sync();
+            return;
+        }
+
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(rank_, r);
                 void* expected{};
@@ -111,7 +120,7 @@ struct ThreadCommImpl: public HostCommImpl {
                 }
             }
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c        = channel(r, rank_);
                 void* expected = (void*)1;
@@ -124,14 +133,13 @@ struct ThreadCommImpl: public HostCommImpl {
 
     void Broadcast(void* data, int count, DataType dtype, int root, copy_fn copy) override
     {
-        FT_CHECK(copy);
-        if (n_ranks() == 1) {
+        TM_CHECK(copy);
+        if (n_ranks_ == 1) {
             return;
         }
         // transform root to global rank
-        root = l2g_.at(root);
         if (rank_ == root) {
-            for (const auto& r : l2g_) {
+            for (int r = 0; r < n_ranks_; ++r) {
                 if (r != rank_) {
                     auto& c = channel(rank_, r);
                     void* expected{};
@@ -140,7 +148,7 @@ struct ThreadCommImpl: public HostCommImpl {
                     }
                 }
             }
-            for (const auto& r : l2g_) {
+            for (int r = 0; r < n_ranks_; ++r) {
                 if (r != rank_) {
                     auto& c = channel(rank_, r);
                     while (c.load(std::memory_order_relaxed)) {}
@@ -158,11 +166,11 @@ struct ThreadCommImpl: public HostCommImpl {
 
     void AllGather(void* data, int count, DataType dtype, copy_fn copy) override
     {
-        FT_CHECK(copy);
-        if (n_ranks() == 1) {
+        TM_CHECK(copy);
+        if (n_ranks_ == 1) {
             return;
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(rank_, r);
                 void* expected{};
@@ -171,16 +179,16 @@ struct ThreadCommImpl: public HostCommImpl {
                 }
             }
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(r, rank_);
                 void* incoming{};
                 while (!(incoming = c.load(std::memory_order_acquire))) {}
-                copy(incoming, count, data, g2l_[r] * count);
+                copy(incoming, count, data, r * count);
                 c.store(nullptr, std::memory_order_relaxed);
             }
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(rank_, r);
                 while (c.load(std::memory_order_relaxed)) {}
@@ -226,13 +234,13 @@ struct ThreadCommImpl: public HostCommImpl {
         };
         auto dispatch = [&]() -> reduce_fn {
             switch (dtype) {
-                case DataType::TYPE_INT32:
+                case kInt32:
                     return dispatch_op(int32_t{});
-                case DataType::TYPE_INT64:
+                case kInt64:
                     return dispatch_op(int64_t{});
-                case DataType::TYPE_UINT32:
+                case kUint32:
                     return dispatch_op(uint32_t{});
-                case DataType::TYPE_UINT64:
+                case kUint64:
                     return dispatch_op(uint64_t{});
                 default:
                     return {};
@@ -250,13 +258,13 @@ struct ThreadCommImpl: public HostCommImpl {
     void AllReduce(void* data, int count, DataType dtype, RedOp red_op) override
     {
         const auto reduce    = get_reduce(dtype, red_op);
-        const auto elem_size = get_elem_size(dtype);
-        if (n_ranks() == 1) {
+        const auto elem_size = byte_size(dtype);
+        if (n_ranks_ == 1) {
             return;
         }
         std::unique_ptr<char[]> tmp((char*)::operator new[](elem_size* count));
         std::copy_n((char*)data, elem_size * count, tmp.get());
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(rank_, r);
                 void* expected{};
@@ -265,7 +273,7 @@ struct ThreadCommImpl: public HostCommImpl {
                 }
             }
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(r, rank_);
                 void* incoming{};
@@ -274,7 +282,7 @@ struct ThreadCommImpl: public HostCommImpl {
                 c.store(nullptr, std::memory_order_relaxed);
             }
         }
-        for (const auto& r : l2g_) {
+        for (int r = 0; r < n_ranks_; ++r) {
             if (r != rank_) {
                 auto& c = channel(rank_, r);
                 while (c.load(std::memory_order_relaxed)) {}
@@ -292,7 +300,7 @@ public:
 
     void Export(std::ostream& os) override
     {
-        FT_CHECK((bool)internal_);  // `Initialize` must come befor `Export`
+        TM_CHECK((bool)internal_);  // `Initialize` must come befor `Export`
 
         const void* ptr = this;
         os.write((const char*)&ptr, sizeof(ptr));
@@ -304,7 +312,7 @@ public:
         is.read((char*)&ptr, sizeof(ptr));
         internal_ = reinterpret_cast<ThreadGroupId*>(ptr)->internal_;
 
-        FT_CHECK((bool)internal_);
+        TM_CHECK((bool)internal_);
     }
 
     HostComm CreateCommunicator(int n_ranks, int rank) override
@@ -313,12 +321,12 @@ public:
             internal_->state = std::make_shared<ThreadCommImpl::State>(n_ranks);
         };
 
-        FT_CHECK((bool)internal_);
+        TM_CHECK((bool)internal_);
 
         // One of the rank initialize the shared state
         std::call_once(internal_->flag, init_shared_state);
 
-        FT_CHECK((bool)internal_->state);
+        TM_CHECK((bool)internal_->state);
 
         auto impl = std::make_shared<ThreadCommImpl>(n_ranks, internal_->state, rank);
 

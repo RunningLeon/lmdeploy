@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, RopeType, build_rotary_embedding
+from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, build_rotary_embedding_from_config
 from lmdeploy.pytorch.nn.linear import build_qkv_proj, build_rowwise_linear
 from lmdeploy.pytorch.nn.moe import SoftmaxTopK, build_fused_moe
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
@@ -15,7 +15,7 @@ from .utils.cudagraph import CudaGraphMixin
 
 
 class MixtralAttention(nn.Module):
-    """mixtral attention."""
+    """Mixtral attention."""
 
     def __init__(self, config: Any, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -99,7 +99,7 @@ class MixtralAttention(nn.Module):
 
 
 class MixtralSparseMoeBlock(nn.Module):
-    """mixtral sparse moe block."""
+    """Mixtral sparse moe block."""
 
     def __init__(self, config: Any, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -151,7 +151,7 @@ class MixtralSparseMoeBlock(nn.Module):
 
 
 class MixtralDecoderLayer(nn.Module):
-    """mixtral decoder layer."""
+    """Mixtral decoder layer."""
 
     def __init__(self, config: Any, layer_idx: int, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -204,7 +204,7 @@ class MixtralDecoderLayer(nn.Module):
 
 
 class MixtralModel(nn.Module):
-    """mixtral model."""
+    """Mixtral model."""
 
     def __init__(self, config: Any, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -223,18 +223,7 @@ class MixtralModel(nn.Module):
         # build norm
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, quant_config=None, dtype=dtype, device=device)
 
-        emb_type = RopeType.LinearScaling
-        rope_dim = config.hidden_size // config.num_attention_heads
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        scaling_factor = 1.0
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            scaling_factor,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
     def forward(
         self,
@@ -269,12 +258,12 @@ class MixtralModel(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
 class MixtralForCausalLM(nn.Module, CudaGraphMixin):
-    """mixture model for causalLM."""
+    """Mixture model for causalLM."""
 
     def __init__(self,
                  config: Any,
@@ -311,11 +300,11 @@ class MixtralForCausalLM(nn.Module, CudaGraphMixin):
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.lm_head(hidden_states)
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -324,7 +313,7 @@ class MixtralForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         input_ids = context.input_ids
         position_ids = context.position_ids
         attn_metadata = context.attn_metadata
@@ -338,7 +327,7 @@ class MixtralForCausalLM(nn.Module, CudaGraphMixin):
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

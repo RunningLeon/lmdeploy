@@ -1,4 +1,3 @@
-gradio
-partial_json_parser
+aiohttp
+prometheus_client
 protobuf
-tritonclient[grpc]

@@ -21,7 +21,7 @@ class DlinferAttentionMetadata(AttentionMetadata):
 
 
 class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
-    """dlinfer attention implementation."""
+    """Dlinfer attention implementation."""
 
     def __init__(
         self,
@@ -65,6 +65,7 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
         attn_metadata: DlinferAttentionMetadata,
         k_scales_zeros: Tensor = None,
         v_scales_zeros: Tensor = None,
+        learnable_sink: Tensor = None,
         inplace: bool = True,
     ) -> Tensor:
         """forward."""
@@ -131,6 +132,9 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
             max_kv_seq_len=max_kv_seq_len,
             is_decoding=is_decoding,
             block_size=block_size,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            v_head_size=self.v_head_size,
             attn_mask=attn_mask,
             softmax_scale=self.scale,
             is_unpaged_prefill=is_unpaged_prefill,
@@ -143,7 +147,7 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
 
 
 class DlinferAttentionBuilder(AttentionBuilder[DlinferAttentionMetadata]):
-    """dlinfer attention builder."""
+    """Dlinfer attention builder."""
 
     @staticmethod
     def build(
@@ -156,6 +160,7 @@ class DlinferAttentionBuilder(AttentionBuilder[DlinferAttentionMetadata]):
         sliding_window: int = None,
         logical_softcapping: float = None,
         causal: bool = True,
+        learnable_sink: bool = False,
         **kwargs,
     ) -> DlinferAttentionImpl:
         """build."""

@@ -11,14 +11,13 @@ from transformers.models.mllama.modeling_mllama import MllamaTextConfig, MllamaV
 from lmdeploy.pytorch.engine.input_process import BaseModelInputProcessor, PreprocessInputResult
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, LayerNorm, RMSNorm, RopeType, SiluAndMul,
-                                 build_rotary_embedding)
+from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, LayerNorm, RMSNorm, SiluAndMul,
+                                 build_rotary_embedding_from_config)
 from lmdeploy.pytorch.nn.linear import (build_colwise_linear, build_merged_colwise_linear, build_qkv_proj,
                                         build_rowwise_linear)
-from lmdeploy.pytorch.nn.rotary_embedding import Llama3Parameters
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
-from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin, next_power_of_2
+from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin
 from .utils.model import DeployModelMixin
 
 MLLAMA_IMAGE_TOKEN_ID = 128256
@@ -234,7 +233,7 @@ class MllamaTextCrossAttention(nn.Module):
 
 
 class LlamaMLP(nn.Module):
-    """llama mlp."""
+    """Llama mlp."""
 
     def __init__(self, config: LlamaConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -270,7 +269,7 @@ class LlamaMLP(nn.Module):
 
 
 class MllamaSelfAttentionDecoderLayer(nn.Module):
-    """llama decoder layer."""
+    """Llama decoder layer."""
 
     def __init__(self, config: LlamaConfig, layer_idx: int, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -330,7 +329,7 @@ class MllamaSelfAttentionDecoderLayer(nn.Module):
 
 
 class MllamaCrossAttentionDecoderLayer(nn.Module):
-    """llama decoder layer."""
+    """Llama decoder layer."""
 
     def __init__(self, config: LlamaConfig, layer_idx: int, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -399,7 +398,7 @@ class MllamaCrossAttentionDecoderLayer(nn.Module):
 
 
 class MllamaTextModel(nn.Module):
-    """llama model."""
+    """Llama model."""
 
     def __init__(self, config: LlamaConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -426,41 +425,7 @@ class MllamaTextModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
 
         # build rotary embedding in LlamaModel
-        rope_dim = config.hidden_size // config.num_attention_heads
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        scaling_factor = 1.0
-        llama3_params = None
-        rope_scaling = config.rope_scaling
-        if rope_scaling is None:
-            emb_type = RopeType.LinearScaling
-        else:
-            if 'scaling_factor' in rope_scaling:
-                scaling_factor = rope_scaling['scaling_factor']
-            elif 'factor' in rope_scaling:
-                scaling_factor = rope_scaling['factor']
-
-            rope_type = rope_scaling['rope_type']
-            if rope_type == 'dynamic':
-                emb_type = RopeType.DynamicNTKScaling
-            elif rope_type == 'linear':
-                emb_type = RopeType.LinearScaling
-            elif rope_type == 'llama3':
-                emb_type = RopeType.Llama3
-                low_freq_factor = rope_scaling.get('low_freq_factor', 1.0)
-                high_freq_factor = rope_scaling.get('high_freq_factor', 1.0)
-                llama3_params = Llama3Parameters(low_freq_factor, high_freq_factor)
-            else:
-                raise RuntimeError(f'Unsupported rope type: {rope_type}')
-
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            scaling_factor,
-            llama3_params=llama3_params,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
     def forward(
         self,
@@ -509,12 +474,12 @@ class MllamaTextModel(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
 class MllamaForCausalLM(nn.Module):
-    """llama model."""
+    """Llama model."""
 
     def __init__(self, config: MllamaTextConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -541,7 +506,7 @@ class MllamaForCausalLM(nn.Module):
         cross_attn_metadata: Any = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
         hidden_states = self.model(
             input_ids=input_ids,
             cross_attention_states=cross_attention_states,
@@ -555,12 +520,12 @@ class MllamaForCausalLM(nn.Module):
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.lm_head(hidden_states)
 
 
 class MllamaPrecomputedPositionEmbedding(nn.Module):
-    """vis position embedding."""
+    """Vis position embedding."""
 
     def __init__(self, config: MllamaVisionConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -584,7 +549,7 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
         self._weight_inited = False
 
     def _init_weight(self):
-        """init weight."""
+        """Init weight."""
         if self._weight_inited:
             return
 
@@ -636,7 +601,7 @@ class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
         self._weight_inited = False
 
     def _init_weight(self):
-        """init weight."""
+        """Init weight."""
         if self._weight_inited:
             return
 
@@ -658,7 +623,7 @@ class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
 
 
 class MllamaVisionAttention(nn.Module):
-    """mllama vision attention."""
+    """Mllama vision attention."""
 
     def __init__(self, config: MllamaVisionConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -718,7 +683,7 @@ class MllamaVisionAttention(nn.Module):
 
 
 class MllamaVisionMLP(nn.Module):
-    """mllama vision mlp."""
+    """Mllama vision mlp."""
 
     def __init__(self, config: MllamaVisionConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -751,7 +716,7 @@ class MllamaVisionMLP(nn.Module):
 
 
 class MllamaVisionEncoderLayer(nn.Module):
-    """vision encoder layer."""
+    """Vision encoder layer."""
 
     def __init__(self,
                  config: MllamaVisionConfig,
@@ -774,7 +739,7 @@ class MllamaVisionEncoderLayer(nn.Module):
         self._weight_inited = not is_gated
 
     def _init_weight(self):
-        """init weight."""
+        """Init weight."""
         if self._weight_inited:
             return
 
@@ -813,7 +778,7 @@ class MllamaVisionEncoderLayer(nn.Module):
 
 
 class MllamaVisionEncoder(nn.Module):
-    """vision encoder."""
+    """Vision encoder."""
 
     def __init__(self,
                  config: MllamaVisionConfig,
@@ -847,7 +812,7 @@ class MllamaVisionEncoder(nn.Module):
 
 
 class MllamaVisionModel(nn.Module):
-    """vision model."""
+    """Vision model."""
 
     def __init__(self, config: MllamaVisionConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -1023,7 +988,7 @@ class MllamaVisionModel(nn.Module):
 
 
 class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin):
-    """rewrote model of MllamaForConditionalGeneration."""
+    """Rewrote model of MllamaForConditionalGeneration."""
 
     packed_modules_mapping = {
         'qkv_proj': [
@@ -1091,7 +1056,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         cross_attn_metadata: Any = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
 
         if cross_attn_metadata is None:
             full_text_row_masked_out_mask = None
@@ -1128,11 +1093,11 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.language_model.get_logits(hidden_states)
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.language_model.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -1141,7 +1106,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         # get input_ids, position_ids and attention metadatas
         input_ids = context.input_ids
         position_ids = context.position_ids
@@ -1194,7 +1159,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1231,7 +1196,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         cross_attn_metadata: Any,
         **kwargs,
     ):
-        """support cudagraph."""
+        """Support cudagraph."""
 
         if not attn_metadata.is_decoding:
             return False
@@ -1245,7 +1210,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         return True
 
     def make_buffers_cudagraph(self, graph_meta: CudaGraphMeta, **kwargs):
-        """make cudagraph buffers from forward inputs."""
+        """Make cudagraph buffers from forward inputs."""
         input_buffers = super().make_buffers_cudagraph(graph_meta=graph_meta, **kwargs)
 
         device = graph_meta.device
@@ -1255,7 +1220,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         return input_buffers
 
     def fill_buffers_cudagraph(self, graph_meta: CudaGraphMeta, **kwargs):
-        """fill cudagraph buffers from forward inputs."""
+        """Fill cudagraph buffers from forward inputs."""
         input_buffers = graph_meta.input_buffers
 
         new_inputs = super().fill_buffers_cudagraph(graph_meta=graph_meta, **kwargs)
@@ -1270,7 +1235,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
             input_buffers['cross_kv_seqlens'].zero_()
         input_buffers['cross_kv_seqlens'][:batch_size] = kv_seqlens
 
-        new_batch_size = next_power_of_2(batch_size)
+        new_batch_size = graph_meta.max_batchs
         cross_attn_metadata.block_offsets = input_buffers['block_offsets'][:new_batch_size]
         cross_attn_metadata.q_start_loc = input_buffers['q_start_loc'][:new_batch_size]
         cross_attn_metadata.q_seqlens = input_buffers['q_seqlens'][:new_batch_size]
@@ -1283,7 +1248,7 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
                            past_key_values: List[List[torch.Tensor]],
                            inputs_embeds: Optional[torch.Tensor] = None,
                            context: StepContext = None):
-        """update model meta."""
+        """Update model meta."""
         model_metas = context.model_metas
         if model_metas is None:
             batch_size = context.q_seqlens.size(0)
@@ -1323,12 +1288,12 @@ class MllamaForConditionalGeneration(nn.Module, CudaGraphMixin, DeployModelMixin
         return model_metas
 
     def get_input_processor(self) -> BaseModelInputProcessor:
-        """get input processor."""
+        """Get input processor."""
         return self.input_processor
 
 
 class MLlamaInputProcessor(BaseModelInputProcessor):
-    """mllama input processor."""
+    """Mllama input processor."""
 
     def __init__(self, config: LlamaConfig, dtype: torch.dtype) -> None:
         self.config = config
@@ -1343,7 +1308,7 @@ class MLlamaInputProcessor(BaseModelInputProcessor):
         self.encoder_len = encoder_len
 
     def preprocess_input(self, input_ids, input_multimodals, **kwargs):
-        """prepare multimodal input."""
+        """Prepare multimodal input."""
         if input_multimodals is None or len(input_multimodals) == 0:
             return input_ids, input_multimodals
 

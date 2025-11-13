@@ -13,7 +13,7 @@ from lmdeploy.pytorch.nn.linear import build_rowwise_linear
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .phi3 import Phi3ForCausalLM, Phi3Model
-from .utils.model import DeployModelMixin
+from .utils.model import DeployModelMixin, vlm_model
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(attention_dropout=0.0,
                                                      dropout=0.0,
@@ -31,8 +31,9 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(attention_dropout=0.0,
                                                      projection_dim=768)
 
 
+@vlm_model
 class Phi3ImageEmbedding(nn.Module):
-    """image embedding."""
+    """Image embedding."""
 
     # from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/c45209e90a4c4f7d16b2e9d48503c7f3e83623ed/image_embedding_phi3_v.py#L83 # noqa: E501
     def __init__(self,
@@ -218,7 +219,7 @@ class Phi3ImageEmbedding(nn.Module):
 
 
 class Phi3VModel(Phi3Model):
-    """phi3v model."""
+    """Phi3v model."""
 
     def __init__(self, config: PretrainedConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__(config=config, dtype=dtype, device=device)
@@ -315,7 +316,7 @@ class Phi3VForCausalLM(Phi3ForCausalLM, DeployModelMixin):
         inputs_embeds: torch.Tensor = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         output = super().prepare_inputs_for_generation(past_key_values=past_key_values,
                                                        inputs_embeds=inputs_embeds,
                                                        context=context)
@@ -338,7 +339,7 @@ class Phi3VForCausalLM(Phi3ForCausalLM, DeployModelMixin):
         return output
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         import itertools
 
         vis_prefix = 'vision_embed_tokens.'
@@ -354,7 +355,7 @@ class Phi3VForCausalLM(Phi3ForCausalLM, DeployModelMixin):
             load_weight(param, loaded_weight)
 
     def get_input_processor(self) -> BaseModelInputProcessor:
-        """get input processor."""
+        """Get input processor."""
         return self.input_processor
 
 
@@ -369,7 +370,7 @@ class Phi3VInputProcessor(BaseModelInputProcessor):
                          input_ids: List[int],
                          input_multimodals: List[Dict[str, Any]] = None,
                          **kwargs) -> PreprocessInputResult:
-        """prepare multimodal input."""
+        """Prepare multimodal input."""
         if input_multimodals is None or len(input_multimodals) == 0:
             return input_ids, input_multimodals
 

@@ -31,9 +31,8 @@ def autoget_backend(model_path: str) -> Literal['turbomind', 'pytorch']:
     Returns:
         str: the backend type.
     """
-    from lmdeploy.pytorch.supported_models import is_supported as is_supported_pytorch
 
-    pytorch_has, turbomind_has = False, False
+    turbomind_has = False
     is_turbomind_installed = True
     try:
         from lmdeploy.turbomind.supported_models import is_supported as is_supported_turbomind
@@ -41,25 +40,16 @@ def autoget_backend(model_path: str) -> Literal['turbomind', 'pytorch']:
     except ImportError:
         is_turbomind_installed = False
 
-    pytorch_has = is_supported_pytorch(model_path)
-
-    try_run_msg = (f'Try to run with pytorch engine because `{model_path}`'
-                   ' is not explicitly supported by lmdeploy. ')
     if is_turbomind_installed:
         if not turbomind_has:
-            if pytorch_has:
-                logger.warning('Fallback to pytorch engine because '
-                               f'`{model_path}` not supported by turbomind'
-                               ' engine.')
-            else:
-                logger.warning(try_run_msg)
+            logger.warning('Fallback to pytorch engine because '
+                           f'`{model_path}` not supported by turbomind'
+                           ' engine.')
     else:
         logger.warning('Fallback to pytorch engine because turbomind engine is not '
                        'installed correctly. If you insist to use turbomind engine, '
                        'you may need to reinstall lmdeploy from pypi or build from '
                        'source and try again.')
-        if not pytorch_has:
-            logger.warning(try_run_msg)
 
     backend = 'turbomind' if turbomind_has else 'pytorch'
     return backend
@@ -104,7 +94,7 @@ def autoget_backend_config(
 
 
 def check_vl_llm(config: dict) -> bool:
-    """check if the model is a vl model from model config."""
+    """Check if the model is a vl model from model config."""
     if 'auto_map' in config:
         for _, v in config['auto_map'].items():
             if 'InternLMXComposer2ForCausalLM' in v:
@@ -117,10 +107,11 @@ def check_vl_llm(config: dict) -> bool:
     arch = config['architectures'][0]
     supported_archs = set([
         'LlavaLlamaForCausalLM', 'LlavaMistralForCausalLM', 'CogVLMForCausalLM', 'InternLMXComposer2ForCausalLM',
-        'InternVLChatModel', 'MiniGeminiLlamaForCausalLM', 'MGMLlamaForCausalLM', 'MiniCPMV',
-        'LlavaForConditionalGeneration', 'LlavaNextForConditionalGeneration', 'Phi3VForCausalLM',
-        'Qwen2VLForConditionalGeneration', 'Qwen2_5_VLForConditionalGeneration', 'MllamaForConditionalGeneration',
-        'MolmoForCausalLM', 'Gemma3ForConditionalGeneration'
+        'InternVLChatModel', 'MiniCPMV', 'LlavaForConditionalGeneration', 'LlavaNextForConditionalGeneration',
+        'Phi3VForCausalLM', 'Qwen2VLForConditionalGeneration', 'Qwen2_5_VLForConditionalGeneration',
+        'Qwen3VLForConditionalGeneration', 'Qwen3VLMoeForConditionalGeneration', 'MllamaForConditionalGeneration',
+        'MolmoForCausalLM', 'Gemma3ForConditionalGeneration', 'Llama4ForConditionalGeneration',
+        'InternVLForConditionalGeneration', 'InternS1ForConditionalGeneration', 'Glm4vForConditionalGeneration'
     ])
     if arch == 'QWenLMHeadModel' and 'visual' in config:
         return True
@@ -134,7 +125,7 @@ def check_vl_llm(config: dict) -> bool:
 
 
 def get_task(model_path: str):
-    """get pipeline type and pipeline class from model config."""
+    """Get pipeline type and pipeline class from model config."""
     from lmdeploy.serve.async_engine import AsyncEngine
 
     if os.path.exists(os.path.join(model_path, 'triton_models', 'weights')):
@@ -150,7 +141,7 @@ def get_task(model_path: str):
 
 
 def get_model_arch(model_path: str):
-    """get a model's architecture and configuration.
+    """Get a model's architecture and configuration.
 
     Args:
         model_path(str): the model path

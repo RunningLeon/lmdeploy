@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lmdeploy.pytorch.config import CacheConfig
-from lmdeploy.pytorch.messages import SchedulerSession
+from lmdeploy.pytorch.messages import SchedulerSession, SequenceManager, SequenceMeta
 from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
 from lmdeploy.pytorch.paging.block_manager import build_block_manager
 from lmdeploy.pytorch.paging.block_trie import BlockTrie
@@ -38,9 +38,17 @@ class TestBlockTrie:
     def block_trie(self, cache_config, block_mgr):
         yield BlockTrie(cache_config, block_mgr)
 
-    def test_allocate(self, block_trie, block_mgr, block_size):
+    @pytest.fixture
+    def seq_manager(self, block_size):
+        from lmdeploy.pytorch.strategies.ar.sequence import ARSequenceStrategy
+        strategy = ARSequenceStrategy()
+        seq_meta = SequenceMeta(block_size, strategy=strategy)
+        yield SequenceManager(seq_meta)
+
+    def test_allocate(self, block_trie, block_mgr, seq_manager):
         allocator = block_trie.allocator
-        sess = SchedulerSession(0, block_size)
+        sess = SchedulerSession(0, seq_manager)
+        block_size = sess.seq_meta.block_size
         token_ids = ([1] * block_size + [2] * block_size)
         token_ids += [3] * (block_size // 2)
         seq = sess.add_sequence(token_ids)
@@ -76,9 +84,10 @@ class TestBlockTrie:
         assert node in block_trie.leaves
         assert len(block_trie.leaves) == 1
 
-    def test_match(self, block_trie, block_mgr, block_size):
+    def test_match(self, block_trie, block_mgr, seq_manager):
         allocator = block_trie.allocator
-        sess = SchedulerSession(0, block_size)
+        sess = SchedulerSession(0, seq_manager)
+        block_size = sess.seq_meta.block_size
 
         # initialize cache
         token_ids = ([1] * block_size + [2] * block_size)
@@ -113,9 +122,10 @@ class TestBlockTrie:
         ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
         assert np.array_equal(ref_cnt, [4, 3])
 
-    def test_evict(self, block_trie, block_size, num_gpu_blocks):
+    def test_evict(self, block_trie, seq_manager, num_gpu_blocks):
         block_mgr = block_trie.block_manager
-        sess = SchedulerSession(0, block_size)
+        sess = SchedulerSession(0, seq_manager)
+        block_size = sess.seq_meta.block_size
         token_ids = ([1] * block_size * (num_gpu_blocks - 1))
         token_ids += [2] * (block_size // 2)
         seq = sess.add_sequence(token_ids)
@@ -135,9 +145,9 @@ class TestBlockTrie:
         assert leaf != new_leaf
         assert block_mgr.get_num_free_gpu_blocks() == 5
 
-    def test_allocate_multimodals(self, block_trie, block_mgr, block_size):
+    def test_allocate_multimodals(self, block_trie, block_mgr, block_size, seq_manager):
         allocator = block_trie.allocator
-        sess = SchedulerSession(0, block_size)
+        sess = SchedulerSession(0, seq_manager)
         half_block_size = block_size // 2
         # test case 1 single block
         token_ids = [1] * block_size + [2] * half_block_size
@@ -262,12 +272,12 @@ class TestBlockTrie:
         logical_blocks = seq.logical_blocks
         assert len(logical_blocks) == 4
         ref_cnt = allocator.get_ref_count(logical_blocks.get_real_blocks())
-        assert np.array_equal(ref_cnt, [2, 1, 1, 1])
+        assert np.array_equal(ref_cnt, [2, 2, 2, 1])
         node = getattr(seq.logical_blocks, 'last_shared_node', None)
         assert node is not None
-        assert node.mm_hashes == tuple(['image_0', 'image_1'])
-        assert node.num_matched == block_size
-        expect_tokens = [1] * quarter_block_size + [2] * half_block_size + [3] * quarter_block_size
+        assert node.mm_hashes == tuple(['image_3'])
+        assert node.num_matched == block_size * 3
+        expect_tokens = [4] * quarter_block_size + [5] * half_block_size + [6] * quarter_block_size
         assert np.array_equal(node.tokens, expect_tokens)
 
         # append text to make last vision block full
@@ -280,21 +290,21 @@ class TestBlockTrie:
         assert np.array_equal(ref_cnt, [2, 2, 2, 2, 1])
         node = getattr(seq.logical_blocks, 'last_shared_node', None)
         assert node is not None
-        assert node.mm_hashes == tuple(['image_3'])
+        assert node.mm_hashes is None
         assert node.num_matched == 4 * block_size
         expect_tokens = [6] * (block_size - quarter_block_size) + [7] * quarter_block_size
         assert np.array_equal(node.tokens, expect_tokens)
         parent = node.parent
         assert parent is not None
-        assert parent.mm_hashes == tuple(['image_2', 'image_3'])
+        assert parent.mm_hashes == tuple(['image_3'])
         assert parent.num_matched == 3 * block_size
         expect_tokens = [4] * quarter_block_size + [5] * half_block_size + [6] * quarter_block_size
         assert np.array_equal(parent.tokens, expect_tokens)
 
     @pytest.mark.test
-    def test_match_multimodals(self, block_trie, block_mgr, block_size):
+    def test_match_multimodals(self, block_trie, block_mgr, block_size, seq_manager):
         allocator = block_trie.allocator
-        sess = SchedulerSession(0, block_size)
+        sess = SchedulerSession(0, seq_manager)
         half_block_size = block_size // 2
         quarter_block_size = block_size // 4
 

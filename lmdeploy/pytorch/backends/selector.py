@@ -3,7 +3,7 @@ from lmdeploy.pytorch.devices import DeviceContext, get_device_manager
 
 
 def _get_backend():
-    """get device backend implement."""
+    """Get device backend implement."""
     device_mgr = get_device_manager()
     device_ctx = device_mgr.current_context()
 
@@ -13,20 +13,20 @@ def _get_backend():
         from .cuda import CudaOpsBackend
         return CudaOpsBackend
     if device_type == 'ascend':
-        from .dlinfer import AscendOpsBackend
+        from .dlinfer.ascend import AscendOpsBackend
         return AscendOpsBackend
     if device_type == 'maca':
-        from .dlinfer import MacaOpsBackend
+        from .dlinfer.maca import MacaOpsBackend
         return MacaOpsBackend
     if device_type == 'camb':
-        from .dlinfer import CambOpsBackend
+        from .dlinfer.camb import CambOpsBackend
         return CambOpsBackend
     else:
         raise RuntimeError(f'Unsupported device type: {device_type}')
 
 
 def get_backend(backend_type: str = None):
-    """get device backend."""
+    """Get device backend."""
     if backend_type is None:
         return _get_backend()
     else:
@@ -37,6 +37,6 @@ def get_backend(backend_type: str = None):
 
 
 def init_backend(backend_type: str):
-    """init device backend."""
+    """Init device backend."""
     backend = get_backend(backend_type)
     backend.init()

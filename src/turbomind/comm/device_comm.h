@@ -9,7 +9,6 @@
 #include <cuda_runtime.h>
 
 #include "src/turbomind/comm/host_comm.h"
-#include "src/turbomind/utils/Tensor.h"
 
 namespace turbomind::comm {
 
@@ -104,6 +103,17 @@ public:
                              int2         flags,  // (is_first, is_last)
                              int          group,
                              cudaStream_t stream)
+    {
+        throw std::runtime_error("not implemented");
+    }
+
+    virtual void Broadcast(const void*  sendbuff,  //
+                           void*        recvbuff,
+                           size_t       count,
+                           DataType     type,
+                           int          root,
+                           int          group,
+                           cudaStream_t stream)
     {
         throw std::runtime_error("not implemented");
     }

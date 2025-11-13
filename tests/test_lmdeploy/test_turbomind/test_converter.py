@@ -28,7 +28,7 @@ def test_registered_models():
         ('liuhaotian/llava-v1.6-mistral-7b', 'hf', 0, 'bfloat16', 'tm'),
         ('liuhaotian/llava-v1.6-vicuna-13b', 'hf', 0, 'bfloat16', 'tm'),
         ('OpenGVLab/InternVL-Chat-V1-5', 'hf', 0, 'bfloat16', 'tm'),
-        ('deepseek-ai/deepseek-vl-7b-chat', 'hf', 0, 'float16', 'tm'), ('YanweiLi/MGM-7B', 'hf', 0, 'bfloat16', 'tm'),
+        ('deepseek-ai/deepseek-vl-7b-chat', 'hf', 0, 'float16', 'tm'),
         ('Qwen/Qwen1.5-4B-Chat-AWQ', 'awq', 128, 'int4', 'tm'),
         ('solidrust/Meta-Llama-3-8B-Instruct-hf-AWQ', 'awq', 128, 'int4', 'tm'),
         ('internlm/internlm2-chat-20b-4bits', 'awq', 128, 'int4', 'tm'),
@@ -43,7 +43,6 @@ def test_registered_models():
                                                                           group_size=0)
         assert output_name == register_name
         assert config.model_config.group_size == group_size
-        assert config.weight_type == weight_type
         assert config.session_len > 0
         assert config.model_config.model_arch is not None
 

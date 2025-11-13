@@ -6,6 +6,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 import PIL
 
 from lmdeploy.messages import PytorchEngineConfig, TurbomindEngineConfig, VisionConfig
+from lmdeploy.model import BaseChatTemplate
 from lmdeploy.serve.async_engine import AsyncEngine
 from lmdeploy.utils import get_logger, try_import_deeplink
 from lmdeploy.vl.engine import ImageEncoder
@@ -42,7 +43,7 @@ class VLAsyncEngine(AsyncEngine):
 
     @classmethod
     def _convert_prompts(cls, prompts: Union[VLPromptType, List[Dict], List[VLPromptType], List[List[Dict]]]):
-        """convert prompts to openai GPT4V format."""
+        """Convert prompts to openai GPT4V format."""
         if isinstance(prompts, str) or isinstance(prompts, tuple):
             _prompts = cls.prompt_to_messages(prompts)
         elif isinstance(prompts[0], tuple) or isinstance(prompts[0], str):
@@ -57,26 +58,38 @@ class VLAsyncEngine(AsyncEngine):
                                 sequence_start: bool,
                                 adapter_name: str,
                                 tools: Optional[List[object]] = None,
+                                enable_thinking: Optional[bool] = None,
                                 **kwargs):
-        """process messages and return the required data for the inference
+        """Process messages and return the required data for the inference
         engines.
 
         Refer to pytorch.engine.EngineInstance.async_stream_infer and turbomind.TurboMindInstance.async_stream_infer for
         the argument specification.
         """
         if isinstance(messages, str):
-            return await super()._get_prompt_input(messages, do_preprocess, sequence_start, adapter_name, tools,
+            return await super()._get_prompt_input(messages,
+                                                   do_preprocess,
+                                                   sequence_start,
+                                                   adapter_name,
+                                                   tools=tools,
+                                                   enable_thinking=enable_thinking,
                                                    **kwargs)
         elif isinstance(messages, List):
             has_multimodal_input = any(
                 isinstance(message['content'], list) and any(item['type'] in ['image_url', 'image_data']
                                                              for item in message['content']) for message in messages)
             if not has_multimodal_input:
-                return await super()._get_prompt_input(messages, do_preprocess, sequence_start, adapter_name, tools,
+                return await super()._get_prompt_input(messages,
+                                                       do_preprocess,
+                                                       sequence_start,
+                                                       adapter_name,
+                                                       tools,
+                                                       enable_thinking=enable_thinking,
                                                        **kwargs)
         else:
             raise RuntimeError(f'unsupported messages {messages}')
 
+        chat_template = self.chat_template if do_preprocess else BaseChatTemplate()
         messages = await self.async_convert_to_pil_images(messages)
         results = await self.vl_encoder.preprocess(messages)
         if self.backend == 'turbomind':
@@ -86,13 +99,21 @@ class VLAsyncEngine(AsyncEngine):
             # embedding_ranges and so on. All the returned values are passed
             # to tm engine for token generation
             results = await self.vl_encoder.async_infer(results)
-            results = await self.vl_encoder.wrap_for_turbomind(results, self.chat_template, self.tokenizer,
-                                                               sequence_start)
+            results = await self.vl_encoder.wrap_for_turbomind(results,
+                                                               chat_template,
+                                                               self.tokenizer,
+                                                               sequence_start,
+                                                               tools=tools,
+                                                               enable_thinking=enable_thinking)
         elif self.backend == 'pytorch':
             # for pt engine, this module only conduct the image preprocessing
             # It leaves the vision embedding to the pt engine
-            results = await self.vl_encoder.wrap_for_pytorch(results, self.chat_template, self.tokenizer,
-                                                             sequence_start)
+            results = await self.vl_encoder.wrap_for_pytorch(results,
+                                                             chat_template,
+                                                             self.tokenizer,
+                                                             sequence_start,
+                                                             tools=tools,
+                                                             enable_thinking=enable_thinking)
         return results
 
     @classmethod
@@ -218,13 +239,14 @@ class VLAsyncEngine(AsyncEngine):
 
         # recover prompts & history
         sess._prompt = prompts
-        last_round = sess.history[-1]
-        sess.history[-1] = (prompts, last_round[-1])
+        if sess.history:
+            last_round = sess.history[-1]
+            sess.history[-1] = (prompts, last_round[-1])
         return sess
 
     @classmethod
     def prompt_to_messages(cls, prompt: VLPromptType):
-        """convert prompt to GTP4V format."""
+        """Convert prompt to GTP4V format."""
         messages = {
             'role': 'user',
             'content': [{

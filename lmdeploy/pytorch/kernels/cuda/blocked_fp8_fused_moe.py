@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 # modify from: https://github.com/vllm-project/vllm
+from typing import Callable
+
 import torch
 import triton
 import triton.language as tl
@@ -13,20 +15,14 @@ def get_cuda_autotune_config():
     return [
         triton.Config({
             'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 64,
-        }, num_stages=4, num_warps=4),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
             'BLOCK_SIZE_N': 128,
-        }, num_stages=4, num_warps=4),
+        }, num_stages=3, num_warps=4),
     ]
 
 
 @triton.autotune(
     configs=get_cuda_autotune_config(),
     key=['N', 'K', 'M_NP2'],
-    warmup=10,
-    rep=25,
 )
 @triton.jit
 def fused_moe_blocked_f8_kernel(
@@ -34,6 +30,7 @@ def fused_moe_blocked_f8_kernel(
     A_scale,
     B,
     B_scale,
+    bias,
     C,
     SortedIdx,
     ExpStart,
@@ -54,6 +51,8 @@ def fused_moe_blocked_f8_kernel(
     stride_bse: tl.constexpr,
     stride_bsk: tl.constexpr,
     stride_bsn: tl.constexpr,
+    stride_bie: tl.constexpr,
+    stride_bin: tl.constexpr,
     stride_cm,
     stride_cn: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -67,7 +66,7 @@ def fused_moe_blocked_f8_kernel(
     reindex_a: tl.constexpr,
     reindex_c: tl.constexpr,
 ):
-    """fused moe kernel."""
+    """Fused moe kernel."""
     exp_id = tl.program_id(1)
     pid = tl.program_id(0)
 
@@ -116,15 +115,28 @@ def fused_moe_blocked_f8_kernel(
     as_ptrs = A_scale + offs_am * stride_asm
     bs_ptrs = B_scale + stride_bse * exp_id + offs_bsn * stride_bsn
 
-    acc_scale = tl.load(as_ptrs, mask=mask_sid, other=1.0) * tl.load(bs_ptrs)
-    acc_ratio = 1 / acc_scale
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    # initialize acc_ratio and acc_scale
+    a_scale = tl.load(as_ptrs, mask=mask_sid, other=1.0)
+    b_scale = tl.load(bs_ptrs)
+    acc_scale0 = a_scale * b_scale
+
+    k_start = BLOCK_SIZE_K
+    offs_ksa = k_start // group_ak
+    offs_ksb = k_start // group_bk
+    a_scale = tl.load(as_ptrs + offs_ksa * stride_ask, mask=mask_sid & (k_start < K), other=1.0)
+    b_scale = tl.load(bs_ptrs + offs_ksb * stride_bsk, mask=k_start < K, other=1.0)
+    acc_scale1 = tl.maximum(a_scale * b_scale, 1e-12)
+    acc_ratio = acc_scale0 / acc_scale1
+    acc_scale = acc_scale1
+
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # load scales
-        k_start = (k + 1) * BLOCK_SIZE_K
+        k_start = (k + 2) * BLOCK_SIZE_K
         offs_ksa = k_start // group_ak
         offs_ksb = k_start // group_bk
-        a_scale = tl.load(as_ptrs + offs_ksa * stride_ask, mask=mask_sid and k_start < K, other=1.0)
+        a_scale = tl.load(as_ptrs + offs_ksa * stride_ask, mask=mask_sid & (k_start < K), other=1.0)
         b_scale = tl.load(bs_ptrs + offs_ksb * stride_bsk, mask=k_start < K, other=1.0)
 
         # load ab
@@ -132,10 +144,11 @@ def fused_moe_blocked_f8_kernel(
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         # mma
-        accumulator = tl.dot(a, b, acc=accumulator * acc_ratio[:, None])
+        accumulator = tl.dot(a, b, acc=accumulator)
+        accumulator *= acc_ratio[:, None]
 
         # update scales and ratio
-        new_acc_scale = a_scale * b_scale
+        new_acc_scale = tl.maximum(a_scale * b_scale, 1e-12)
         acc_ratio = acc_scale / new_acc_scale
         acc_scale = new_acc_scale
 
@@ -143,6 +156,11 @@ def fused_moe_blocked_f8_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     c = accumulator * (acc_ratio * acc_scale)[:, None]
+
+    if bias is not None:
+        bias_ptrs = bias + exp_id * stride_bie + offs_bn * stride_bin
+        bias_val = tl.load(bias_ptrs).to(accumulator.dtype)
+        c += bias_val[None]
 
     if ENABLE_WEIGHTS:
         weight = tl.load(Weights + sid, mask=mask_sid)
@@ -168,6 +186,7 @@ def fused_moe_blocked_fp8_kernel_launcher(
     exp_start: torch.Tensor,
     exp_end: torch.Tensor,
     weights: torch.Tensor,
+    bias: torch.Tensor = None,
     enable_weights: bool = False,
     top_k: int = 1,
     num_tokens: int = None,
@@ -175,7 +194,7 @@ def fused_moe_blocked_fp8_kernel_launcher(
     reindex_a: bool = True,
     reindex_c: bool = True,
 ):
-    """fused moe kernel launcher."""
+    """Fused moe kernel launcher."""
 
     if num_tokens is None:
         num_tokens = A.size(0)
@@ -202,15 +221,17 @@ def fused_moe_blocked_fp8_kernel_launcher(
 
     A = A.flatten(0, -2)
     C = C.flatten(0, -2)
+    enable_bias = bias is not None
 
     BLOCK_SIZE_K = group_bk
-    GROUP_SIZE_M = 8
+    GROUP_SIZE_M = 1
     grid = _grid_fn
     fused_moe_blocked_f8_kernel[grid](
         A,
         A_scale,
         B,
         B_scale,
+        bias,
         C,
         sorted_idx,
         exp_start,
@@ -233,6 +254,8 @@ def fused_moe_blocked_fp8_kernel_launcher(
         stride_bsk=B_scale.stride(2),
         stride_cm=C.stride(0),
         stride_cn=C.stride(1),
+        stride_bie=bias.stride(0) if enable_bias else 0,
+        stride_bin=bias.stride(1) if enable_bias else 0,
         ENABLE_WEIGHTS=enable_weights,
         top_k=top_k,
         expert_offset=expert_offset,
@@ -253,11 +276,14 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
                           topk_weights: torch.Tensor,
                           topk_ids: torch.Tensor,
                           topk: int,
+                          w1_bias: torch.Tensor = None,
+                          w2_bias: torch.Tensor = None,
                           out_dtype: torch.dtype = torch.float16,
                           expert_offset: int = 0,
                           num_experts: int = None,
-                          renormalize: bool = False) -> torch.Tensor:
-    """fused moe."""
+                          renormalize: bool = False,
+                          act_func: Callable = None) -> torch.Tensor:
+    """Fused moe."""
     device = input.device
     M = input.size(0)
     E, N, _ = w1.shape
@@ -281,6 +307,7 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
         exp_start=exp_start,
         exp_end=exp_end,
         weights=topk_weights,
+        bias=w1_bias,
         enable_weights=False,
         top_k=topk,
         num_tokens=M,
@@ -291,7 +318,10 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
 
     # activate
     intermediate_cache1 = intermediate_cache1.flatten(0, -2)
-    gate_cache = silu_and_mul(intermediate_cache1)
+    if act_func is None:
+        gate_cache = silu_and_mul(intermediate_cache1)
+    else:
+        gate_cache = act_func(intermediate_cache1)
     del intermediate_cache1
     gate_cache, gate_scale = quant_fp8(gate_cache, group_size, dtype=input.dtype)
 
@@ -307,6 +337,7 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
         exp_start=exp_start,
         exp_end=exp_end,
         weights=topk_weights,
+        bias=w2_bias,
         enable_weights=True,
         top_k=1,
         num_tokens=M,

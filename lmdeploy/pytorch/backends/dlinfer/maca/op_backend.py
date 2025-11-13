@@ -12,12 +12,12 @@ logger = get_logger('lmdeploy')
 
 
 class MacaOpsBackend(DlinferOpsBackend):
-    """maca layer backend."""
+    """Maca layer backend."""
     total_slots = None
 
     @staticmethod
     def get_name() -> str:
-        """backend name."""
+        """Backend name."""
         return 'maca'
 
     @staticmethod
@@ -27,8 +27,7 @@ class MacaOpsBackend(DlinferOpsBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
-        x = 16
-        return (num_heads, head_size // x, block_size, x)
+        return (block_size, num_heads, head_size)
 
     @staticmethod
     def get_v_block_shape(
@@ -37,11 +36,11 @@ class MacaOpsBackend(DlinferOpsBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
-        return (num_heads, block_size, head_size)
+        return (block_size, num_heads, head_size)
 
     @classmethod
     def update_step_context(cls, step_context):
-        """update step context."""
+        """Update step context."""
 
         def get_total_slots():
             if cls.total_slots is None:
@@ -52,7 +51,7 @@ class MacaOpsBackend(DlinferOpsBackend):
             return cls.total_slots
 
         kv_start_indices, attention_mask = [], []
-        block_num, _, block_size, _ = step_context.kv_caches[0][1].shape
+        block_num, block_size, _, _ = step_context.kv_caches[0][1].shape
         device = step_context.block_offsets.device
 
         is_unpaged_prefill = False
@@ -106,6 +105,11 @@ class MacaOpsBackend(DlinferOpsBackend):
     @staticmethod
     def build_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
                            backend_config: BackendConfig, device: torch.device):
-        """build graph runner."""
+        """Build graph runner."""
         from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
         return CUDAGraphRunner(model, model_config, cache_config, backend_config, device)
+
+    @staticmethod
+    def support_ray():
+        """Support ray."""
+        return True

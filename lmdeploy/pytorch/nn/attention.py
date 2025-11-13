@@ -10,7 +10,7 @@ from .utils import get_distribute_size
 
 
 def _update_num_heads(num_heads: int, num_kv_heads: int):
-    """update heads."""
+    """Update heads."""
     dist_ctx = get_dist_manager().current_context()
     if dist_ctx.dp == 1:
         world_size, rank = get_tp_world_rank()
@@ -36,6 +36,8 @@ class Attention(nn.Module):
         logit_softcapping: float = None,
         causal: bool = True,
         use_flash_mla: bool = False,
+        learnable_sink: bool = False,
+        block_sparse_size: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -59,6 +61,8 @@ class Attention(nn.Module):
             logit_softcapping=logit_softcapping,
             causal=causal,
             use_flash_mla=use_flash_mla,
+            learnable_sink=learnable_sink,
+            block_sparse_size=block_sparse_size,
             **kwargs,
         )
 
@@ -72,6 +76,7 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         k_scales_zeros: torch.Tensor = None,
         v_scales_zeros: torch.Tensor = None,
+        s_aux: torch.Tensor = None,
         inplace: bool = True,
     ) -> torch.Tensor:
         """forward."""
@@ -84,12 +89,17 @@ class Attention(nn.Module):
             attn_metadata=attn_metadata,
             k_scales_zeros=k_scales_zeros,
             v_scales_zeros=v_scales_zeros,
+            learnable_sink=s_aux,
             inplace=inplace,
         )
 
+    @staticmethod
+    def update_meta_flashmla(attn_metadata: AttentionMetadata, num_attention_heads):
+        get_backend().update_meta_flashmla(attn_metadata, num_attention_heads)
+
 
 class FlashAttention(nn.Module):
-    """flash attention w/o paging."""
+    """Flash attention w/o paging."""
 
     def __init__(
         self,

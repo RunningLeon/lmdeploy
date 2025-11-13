@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import List
+from typing import Callable, List
 
 import torch
 
@@ -10,19 +10,19 @@ from ..moe import FusedMoEBuilder, FusedMoEImpl, SoftmaxTopKBuilder, SoftmaxTopK
 
 
 class DlinferSoftmaxTopKImpl(SoftmaxTopKImpl):
-    """dlinfer softmax topk implementation."""
+    """Dlinfer softmax topk implementation."""
 
     def __init__(self, top_k: int, dim: int = -1):
         self.top_k = top_k
         self.dim = dim
 
     def forward(self, x: torch.Tensor):
-        routing_weights, selected_experts = moe_gating_topk_softmax(x.to(torch.float32), self.top_k)
+        routing_weights, selected_experts = moe_gating_topk_softmax(x, self.top_k)
         return routing_weights, selected_experts
 
 
 class DlinferSoftmaxTopKBuilder(SoftmaxTopKBuilder):
-    """dlinfer softmax topk implementation builder."""
+    """Dlinfer softmax topk implementation builder."""
 
     @staticmethod
     def build(top_k: int, dim: int = -1):
@@ -31,11 +31,18 @@ class DlinferSoftmaxTopKBuilder(SoftmaxTopKBuilder):
 
 
 class DlinferFusedMoEImpl(FusedMoEImpl):
-    """dlinfer fused moe implementation."""
+    """Dlinfer fused moe implementation."""
 
     def __init__(self, top_k: int, renormalize: bool = False):
         self.top_k = top_k
         self.renormalize = renormalize
+
+    def update_weights(self, gate_up_weights: torch.Tensor, down_weights: torch.Tensor):
+        """Update weights."""
+        device_type = gate_up_weights.device.type
+        if device_type in ['npu']:
+            return gate_up_weights.transpose(-1, -2).contiguous(), down_weights.transpose(-1, -2).contiguous()
+        return gate_up_weights, down_weights
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -43,16 +50,21 @@ class DlinferFusedMoEImpl(FusedMoEImpl):
                 topk_ids: torch.LongTensor,
                 gate_up_weights: torch.Tensor,
                 down_weights: torch.Tensor,
-                expert_list: List[int] = None):
+                gate_up_bias: torch.Tensor = None,
+                down_bias: torch.Tensor = None,
+                expert_list: List[int] = None,
+                act_func: Callable = None):
         """forward."""
+        assert gate_up_bias is None
+        assert down_bias is None
         return fused_moe(hidden_states, gate_up_weights, down_weights, topk_weights, topk_ids, self.top_k,
                          self.renormalize)
 
 
 class DlinferFusedMoEBuilder(FusedMoEBuilder):
-    """dlinfer fused moe builder."""
+    """Dlinfer fused moe builder."""
 
     @staticmethod
     def build(top_k: int, num_experts: int, renormalize: bool = False):
-        """build from mlp."""
+        """Build from mlp."""
         return DlinferFusedMoEImpl(top_k=top_k, renormalize=renormalize)

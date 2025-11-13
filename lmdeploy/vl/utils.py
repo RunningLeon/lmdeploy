@@ -16,7 +16,7 @@ logger = get_logger('lmdeploy')
 
 
 def encode_image_base64(image: Union[str, Image.Image]) -> str:
-    """encode raw date to base64 format."""
+    """Encode raw date to base64 format."""
     buffered = BytesIO()
     FETCH_TIMEOUT = int(os.environ.get('LMDEPLOY_FETCH_TIMEOUT', 10))
     headers = {
@@ -48,12 +48,12 @@ def encode_image_base64(image: Union[str, Image.Image]) -> str:
 
 
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
-    """load image from base64 format."""
+    """Load image from base64 format."""
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
 def load_image(image_url: Union[str, Image.Image]) -> Image.Image:
-    """load image from url, local path or openai GPT4V."""
+    """Load image from url, local path or openai GPT4V."""
     FETCH_TIMEOUT = int(os.environ.get('LMDEPLOY_FETCH_TIMEOUT', 10))
     headers = {
         'User-Agent':
@@ -90,12 +90,12 @@ def load_image(image_url: Union[str, Image.Image]) -> Image.Image:
 
 
 def hash_multimodal_data(multimodal_type: str = 'image', **multimodal_datas: object) -> str:
-    """hash image related data."""
+    """Hash image related data."""
 
     multimodal_datas['multimodal_type'] = multimodal_type
 
     def _convert_to_bytes(key: str, value: object):
-        """recursively convert object to bytes."""
+        """Recursively convert object to bytes."""
         if isinstance(value, (list, tuple)):
             for idx, obj in enumerate(value):
                 yield from _convert_to_bytes(f'{key}.{idx}', obj)

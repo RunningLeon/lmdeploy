@@ -15,9 +15,10 @@ MODULE_MAP.update({
     'LlamaForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama.LlamaForCausalLM',
 })
 
-# Falcon Models in transformer / on hub
+# llama4
 MODULE_MAP.update({
-    'FalconForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.falcon.FalconForCausalLM',
+    'Llama4ForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.llama4.Llama4ForConditionalGeneration',
 })
 
 # baichuan
@@ -29,6 +30,22 @@ MODULE_MAP.update({
 MODULE_MAP.update({
     'ChatGLMForConditionalGeneration':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.chatglm2.ChatGLMForConditionalGeneration',  # noqa: E501
+})
+
+# glm4-0414
+MODULE_MAP.update({
+    'Glm4ForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.glm4.Glm4ForCausalLM',
+})
+
+# glm4.1-v
+MODULE_MAP.update({
+    'Glm4vForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.glm4_1v.Glm4vForConditionalGeneration',
+})
+
+# glm4.5
+MODULE_MAP.update({
+    'Glm4MoeForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.glm4_moe.Glm4MoeForCausalLM',
 })
 
 # internlm
@@ -130,9 +147,16 @@ MODULE_MAP.update({
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration',
 })
 
-# dbrx
+# qwen3_vl
 MODULE_MAP.update({
-    'DbrxForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.dbrx.DbrxForCausalLM',
+    'Qwen3VLForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen3_vl.Qwen3VLForConditionalGeneration',
+})
+
+# qwen3_vl_moe
+MODULE_MAP.update({
+    'Qwen3VLMoeForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen3_vl_moe.Qwen3VLMoeForConditionalGeneration',
 })
 
 # starcoder2
@@ -152,6 +176,18 @@ MODULE_MAP.update({
 
 # internvl
 MODULE_MAP.update({'InternVLChatModel': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.internvl.InternVLChatModel'})
+
+# internvl3-hf
+MODULE_MAP.update({
+    'InternVLForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.internvl3_hf.InternVLForConditionalGeneration'
+})
+
+# interns1-hf
+MODULE_MAP.update({
+    'InternS1ForConditionalGeneration':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.internvl3_hf.InternVLForConditionalGeneration'
+})
 
 # mono-internvl
 MODULE_MAP.update({
@@ -195,5 +231,21 @@ MODULE_MAP.update(
 
 # qwen2 reward model
 MODULE_MAP.update({'Qwen2ForRewardModel': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen2_reward.Qwen2ForRewardModel'})
+
+# gpt-oss
+MODULE_MAP.update({
+    'GptOssForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.gpt_oss.GptOssForCausalLM',
+})
+
+# qwen3 next model
+MODULE_MAP.update({
+    'Qwen3NextForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen3_next.Qwen3NextForCausalLM',
+})
+
+# SDAR
+MODULE_MAP.update({
+    'SDARForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.sdar.SDARForCausalLM',
+    'SDARMoeForCausalLM': f'{LMDEPLOY_PYTORCH_MODEL_PATH}.sdar_moe.SDARMoeForCausalLM',
+})
 
 CUSTOM_MODULE_MAP = dict()

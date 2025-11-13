@@ -2,12 +2,15 @@
 import asyncio
 import functools
 import logging
+import os
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from logging import Logger, LogRecord
-from typing import List, Optional, TypeVar, Union
+from typing import List, Optional, Tuple, Union
 
+import torch
 from transformers import PretrainedConfig
 
 logger_initialized = {}
@@ -19,6 +22,36 @@ class _ASNI_COLOR:
     YELLOW = '\033[33m'
     WHITE = '\033[37m'
     GREEN = '\033[32m'
+
+
+# copy from: https://github.com/termcolor/termcolor
+@functools.cache
+def can_colorize(*, no_color: Optional[bool] = None, force_color: Optional[bool] = None) -> bool:
+    """Check env vars and for tty/dumb terminal."""
+    import io
+    if no_color is not None and no_color:
+        return False
+    if force_color is not None and force_color:
+        return True
+
+    # Then check env vars:
+    if os.environ.get('ANSI_COLORS_DISABLED'):
+        return False
+    if os.environ.get('NO_COLOR'):
+        return False
+    if os.environ.get('FORCE_COLOR'):
+        return True
+
+    # Then check system:
+    if os.environ.get('TERM') == 'dumb':
+        return False
+    if not hasattr(sys.stdout, 'fileno'):
+        return False
+
+    try:
+        return os.isatty(sys.stdout.fileno())
+    except io.UnsupportedOperation:
+        return sys.stdout.isatty()
 
 
 class ColorFormatter(logging.Formatter):
@@ -34,7 +67,7 @@ class ColorFormatter(logging.Formatter):
 
     def format(self, record: LogRecord):
         """format."""
-        if sys.platform == 'win32':
+        if not can_colorize():
             # windows does not support ASNI color
             return super().format(record)
         levelname = record.levelname
@@ -80,7 +113,7 @@ _FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d' \
 def get_logger(name: Optional[str] = None,
                log_file: Optional[str] = None,
                log_level: int = logging.INFO,
-               file_mode: str = 'w',
+               file_mode: str = 'a',
                log_formatter: str = _FORMAT) -> Logger:
     """Initialize and get a logger by name.
 
@@ -94,7 +127,7 @@ def get_logger(name: Optional[str] = None,
             will be added to the logger.
         log_level (int): The logger level.
         file_mode (str): The file mode used in opening log file.
-            Defaults to 'w'.
+            Defaults to 'a'.
         log_formatter (str): The logger output format.
     Returns:
         logging.Logger: The expected logger.
@@ -117,7 +150,14 @@ def get_logger(name: Optional[str] = None,
     stream_handler = logging.StreamHandler(stream=sys.stdout)
     handlers = [stream_handler]
 
+    # set log_file from env
+    log_file = log_file or os.getenv('LMDEPLOY_LOG_FILE')
+
     if log_file is not None:
+        log_file = os.path.expanduser(log_file)
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         # Here, the default behaviour of the official logger is 'a'. Thus, we
         # provide an interface to change the file mode to the default
         # behaviour.
@@ -158,7 +198,7 @@ def filter_suffix(response: str, suffixes: Optional[List[str]] = None) -> str:
 
 # TODO remove stop_word_offsets stuff and make it clean
 def _stop_words(stop_words: List[Union[int, str]], tokenizer: object):
-    """return list of stop-words to numpy.ndarray."""
+    """Return list of stop-words to numpy.ndarray."""
     import numpy as np
     if stop_words is None:
         return None
@@ -212,7 +252,7 @@ def get_model(pretrained_model_name_or_path: str, download_dir: str = None, revi
 
 
 def logging_timer(op_name: str, logger: Logger, level: int = logging.DEBUG):
-    """logging timer."""
+    """Logging timer."""
 
     @contextmanager
     def __timer():
@@ -228,7 +268,7 @@ def logging_timer(op_name: str, logger: Logger, level: int = logging.DEBUG):
 
         @functools.wraps(func)
         def __func_warpper(*args, **kwargs):
-            """func warpper."""
+            """Func warpper."""
             if logger.level > level:
                 return func(*args, **kwargs)
             with __timer():
@@ -236,7 +276,7 @@ def logging_timer(op_name: str, logger: Logger, level: int = logging.DEBUG):
 
         @functools.wraps(func)
         def __async_warpper(*args, **kwargs):
-            """async warpper."""
+            """Async warpper."""
 
             async def __tmp():
                 if logger.level > level:
@@ -256,19 +296,15 @@ def logging_timer(op_name: str, logger: Logger, level: int = logging.DEBUG):
 
 # modified from https://github.com/vllm-project/vllm/blob/0650e5935b0f6af35fb2acf71769982c47b804d7/vllm/config.py#L1082-L1150  # noqa
 def _get_and_verify_max_len(
-    hf_tm_config: Union[PretrainedConfig, TypeVar('TurbomindModelConfig')],
+    hf_config: PretrainedConfig,
     max_model_len: Optional[int],
 ) -> int:
     """Get and verify the model's maximum length."""
-    if hasattr(hf_tm_config, 'session_len'):
-        # `hf_tm_config` is TurbomindModelConfig
-        session_len = getattr(hf_tm_config, 'session_len')
-        return max_model_len if max_model_len else session_len
 
     # vl configs hide session-len inside llm configs
     llm_keys = ['language_config', 'llm_config', 'text_config']
     for key in llm_keys:
-        hf_tm_config = getattr(hf_tm_config, key, hf_tm_config)
+        hf_config = getattr(hf_config, key, hf_config)
 
     logger = get_logger('lmdeploy')
     derived_max_model_len = float('inf')
@@ -290,7 +326,7 @@ def _get_and_verify_max_len(
     ]
     max_len_key = None
     for key in possible_keys:
-        max_len = getattr(hf_tm_config, key, None)
+        max_len = getattr(hf_config, key, None)
         if max_len is not None:
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
@@ -313,7 +349,7 @@ def _get_and_verify_max_len(
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
-        model_max_length = getattr(hf_tm_config, 'model_max_length', None)
+        model_max_length = getattr(hf_config, 'model_max_length', None)
         if model_max_length is not None and max_model_len <= model_max_length:
             pass
         else:
@@ -333,7 +369,7 @@ def get_max_batch_size(device_type: str):
     """
     assert device_type in ['cuda', 'ascend', 'maca', 'camb']
     if device_type == 'cuda':
-        max_batch_size_map = {'a100': 256, 'a800': 256, 'h100': 512, 'h800': 512}
+        max_batch_size_map = {'a100': 384, 'a800': 384, 'h100': 1024, 'h800': 1024, 'l20y': 1024, 'h200': 1024}
         import torch
         device_name = torch.cuda.get_device_name(0).lower()
         for name, size in max_batch_size_map.items():
@@ -385,6 +421,8 @@ def is_bf16_supported(device_type: str = 'cuda'):
         return True
     elif device_type == 'camb':
         return True
+    elif device_type == 'rocm':
+        return True
     else:
         return False
 
@@ -403,3 +441,129 @@ def try_import_deeplink(device_type: str):
             logger = get_logger('lmdeploy')
             logger.error(f'{type(e).__name__}: {e}')
             exit(1)
+
+
+def serialize_state_dict(state_dict: dict) -> str:
+    """Serialize state dict to str.
+
+    The consumer should use it on same node. As the producer and consumer may
+    have different GPU visibility, we use reduce_tensor instead of ForkingPickler.dumps
+    to fix the device_id when loading the serialized tensor.
+
+    Args:
+        state_dict (dict[str, torch.Tensor]): state dict to serialize.
+    Returns:
+        str: serialized state dict.
+    """
+    import base64
+    from io import BytesIO
+    from multiprocessing.reduction import ForkingPickler
+
+    from torch.multiprocessing.reductions import reduce_tensor
+
+    # flattened_tensor
+    if 'metadata' in state_dict and 'flattened_tensor' in state_dict:
+        data = state_dict
+        if isinstance(data['flattened_tensor'], torch.Tensor):
+            data['flattened_tensor'] = reduce_tensor(state_dict['flattened_tensor'])
+    else:
+        data = [(k, reduce_tensor(v)) for k, v in state_dict.items()]
+
+    buf = BytesIO()
+    ForkingPickler(buf).dump(data)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
+
+
+def is_dlblas_installed():
+    is_dlblas_installed = True
+    try:
+        import dlblas  # noqa: F401
+    except Exception:
+        is_dlblas_installed = False
+    return is_dlblas_installed
+
+
+# from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/weight_sync/tensor_bucket.py
+
+
+@dataclass
+class FlattenedTensorMetadata:
+    """Metadata for flatten bucket tensor."""
+    name: str
+    shape: torch.Size
+    dtype: torch.dtype
+    start_idx: int
+    end_idx: int
+    numel: int
+
+
+class FlattenedTensorBucket:
+    """Pack multiple flattened tensor into one to transfer efficiently."""
+
+    def __init__(
+        self,
+        named_tensors: List[Tuple[str, torch.Tensor]] = None,
+        flattened_tensor: torch.Tensor = None,
+        metadata: List[FlattenedTensorMetadata] = None,
+    ):
+        """Initialize a tensor bucket from a list of named tensors or from pre-
+        flattened data.
+
+        Args:
+            named_tensors: List of (name, tensor) tuples (for creating new bucket)
+            flattened_tensor: Pre-flattened tensor (for reconstruction)
+            metadata: Pre-computed metadata (for reconstruction)
+        """
+        if named_tensors is not None:
+            num_tensors = len(named_tensors)
+            self.metadata = [None] * num_tensors
+            self.flattened_tensor = [None] * num_tensors
+            if num_tensors > 0:
+                if num_tensors > 1:
+                    dtypes = [t.dtype for _, t in named_tensors]
+                    if not all([d == dtypes[0] for d in dtypes[1:]]):
+                        raise ValueError(f'All tensors should have same dtype, but given {dtypes}')
+
+                current_idx = 0
+                for idx, (name, tensor) in enumerate(named_tensors):
+                    self.flattened_tensor[idx] = tensor.flatten()
+                    numel = tensor.numel()
+                    self.metadata[idx] = FlattenedTensorMetadata(name=name,
+                                                                 shape=tensor.shape,
+                                                                 dtype=tensor.dtype,
+                                                                 start_idx=current_idx,
+                                                                 end_idx=current_idx + numel,
+                                                                 numel=numel)
+                    current_idx += numel
+
+                self.flattened_tensor = torch.cat(self.flattened_tensor, dim=0)
+        else:
+            if flattened_tensor is None or metadata is None:
+                raise ValueError('Must provide either named_tensors or both flattened_tensor and metadata')
+            self.metadata = metadata
+            self.flattened_tensor = flattened_tensor
+
+    def get_flattened_tensor(self) -> torch.Tensor:
+        """Get the flattened tensor containing multiple tensors."""
+        return self.flattened_tensor
+
+    def get_metadata(self) -> List[FlattenedTensorMetadata]:
+        """Get all metadatas for all tensors in the bucket."""
+        return self.metadata
+
+    def reconstruct_tensors(self) -> List[Tuple[str, torch.Tensor]]:
+        """Reconstruct original tensors."""
+        # preallocate the result list
+        reconstructed = [None] * len(self.metadata)
+
+        for i, meta in enumerate(self.metadata):
+            tensor = self.flattened_tensor[meta.start_idx:meta.end_idx].reshape(meta.shape)
+
+            # batch dtype conversion (if needed)
+            if tensor.dtype != meta.dtype:
+                tensor = tensor.to(meta.dtype)
+
+            reconstructed[i] = (meta.name, tensor)
+
+        return reconstructed

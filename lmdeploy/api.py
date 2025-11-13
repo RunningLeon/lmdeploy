@@ -69,11 +69,10 @@ def pipeline(model_path: str,
         model_path = get_model(model_path, download_dir, revision)
 
     _, pipeline_class = get_task(model_path)
-
-    if type(backend_config) is not PytorchEngineConfig:
+    if not isinstance(backend_config, PytorchEngineConfig):
         # set auto backend mode
         backend_config = autoget_backend_config(model_path, backend_config)
-    backend = 'pytorch' if type(backend_config) is PytorchEngineConfig else 'turbomind'
+    backend = 'pytorch' if isinstance(backend_config, PytorchEngineConfig) else 'turbomind'
     logger.info(f'Using {backend} engine')
 
     return pipeline_class(model_path,

@@ -1,16 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os
 from logging import Logger
-from typing import Any, Dict
+from typing import Dict
 
-from lmdeploy.pytorch.config import BackendConfig, CacheConfig, DistConfig, ModelConfig
+from lmdeploy.pytorch import envs
+from lmdeploy.pytorch.config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig
 from lmdeploy.utils import get_logger
 
 from .base import ExecutorBase
 
 
 def get_distributed_executor_backend(world_size: int, dp: int, device_type: str, logger: Logger = None):
-    """get distributed executor backend."""
+    """Get distributed executor backend."""
     from lmdeploy.pytorch.backends import get_backend
 
     def _log_info(message: str):
@@ -18,12 +18,12 @@ def get_distributed_executor_backend(world_size: int, dp: int, device_type: str,
             logger.info(message)
 
     def _log_and_set_backend(message: str, executor_backend: str):
-        """log and set backend."""
+        """Log and set backend."""
         message += f' distributed_executor_backend={executor_backend}.'
         _log_info(message)
         return executor_backend
 
-    executor_backend = os.environ.get('LMDEPLOY_EXECUTOR_BACKEND', None)
+    executor_backend = envs.executor_backend
     if executor_backend is not None:
         return _log_and_set_backend('found environment LMDEPLOY_EXECUTOR_BACKEND.', executor_backend)
 
@@ -57,17 +57,21 @@ def build_executor(model_path: str,
                    cache_config: CacheConfig,
                    backend_config: BackendConfig,
                    dist_config: DistConfig,
-                   tokenizer: Any,
+                   misc_config: MiscConfig,
                    adapters: Dict[str, str] = None,
                    device_type: str = 'cuda',
                    distributed_executor_backend: str = None,
                    dtype: str = 'auto') -> ExecutorBase:
-    """build model agent executor."""
+    """Build model agent executor."""
     logger = get_logger('lmdeploy')
     dp = dist_config.dp
     world_size = dist_config.world_size
 
-    model_config = ModelConfig.from_pretrained(model_path, trust_remote_code=True, dtype=dtype, dist_config=dist_config)
+    model_config = ModelConfig.from_pretrained(model_path,
+                                               trust_remote_code=True,
+                                               dtype=dtype,
+                                               hf_overrides=misc_config.hf_overrides,
+                                               dist_config=dist_config)
 
     if distributed_executor_backend is None:
         distributed_executor_backend = get_distributed_executor_backend(world_size, dp, device_type, logger)
@@ -75,6 +79,11 @@ def build_executor(model_path: str,
     if dp > 1:
         assert distributed_executor_backend == 'ray', (
             'dp>1 requires distributed_executor_backend="ray", ',
+            f'get distributed_executor_backend="{distributed_executor_backend}"')
+
+    if misc_config.empty_init:
+        assert distributed_executor_backend == 'ray', (
+            'empty_init requires distributed_executor_backend="ray", ',
             f'get distributed_executor_backend="{distributed_executor_backend}"')
 
     if distributed_executor_backend is not None:
@@ -87,7 +96,7 @@ def build_executor(model_path: str,
             model_config=model_config,
             cache_config=cache_config,
             backend_config=backend_config,
-            tokenizer=tokenizer,
+            misc_config=misc_config,
             adapters=adapters,
             device_type=device_type,
         )
@@ -99,7 +108,7 @@ def build_executor(model_path: str,
             cache_config=cache_config,
             backend_config=backend_config,
             dist_config=dist_config,
-            tokenizer=tokenizer,
+            misc_config=misc_config,
             adapters=adapters,
             device_type=device_type,
         )
@@ -111,7 +120,7 @@ def build_executor(model_path: str,
             cache_config=cache_config,
             backend_config=backend_config,
             dist_config=dist_config,
-            tokenizer=tokenizer,
+            misc_config=misc_config,
             adapters=adapters,
             device_type=device_type,
             dtype=dtype,

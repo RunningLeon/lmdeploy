@@ -2,47 +2,27 @@
 
 #pragma once
 
-#include "src/turbomind/models/llama/LlamaDenseWeight.h"
-#include "src/turbomind/utils/cublasMMWrapper.h"
 #include <istream>
 #include <ostream>
 
+#include "src/turbomind/core/core.h"
+#include "src/turbomind/models/llama/LlamaDenseWeight.h"
+
 namespace turbomind {
 
-template<typename T>
 class LlamaLinear {
 public:
-    enum Type
-    {
-        kGemm,
-        kFusedSiluFfn,
-        kFusedAdd
-    };
+    explicit LlamaLinear(cudaStream_t stream);
 
-    struct Pitched {
-        const T* ptr;
-        int      pitch;
-        Pitched(const T* ptr, int pitch = 0): ptr{ptr}, pitch{pitch} {}
-    };
+    Tensor Forward(const Tensor&           input,  //
+                   const LlamaDenseWeight& weight,
+                   std::optional<Tensor>   output = {});
 
-    LlamaLinear(cublasMMWrapper* cublas_wrapper, cudaStream_t stream);
-
-    void forward(T*                         output_data,
-                 Pitched                    input_data,
-                 int                        batch_size,
-                 const LlamaDenseWeight<T>& weight,
-                 Type                       type      = kGemm,
-                 T*                         lora_buff = nullptr,
-                 int*                       lora_mask = nullptr);
-
-    void forward_moe(T*                         output_data,
-                     Pitched                    input_data,
-                     const int*                 indexes,
-                     const int*                 offsets,
-                     int                        batch_size,
-                     const LlamaDenseWeight<T>& weight,
-                     Type                       type,
-                     gemm::Context*             context);
+    Tensor Forward(const Tensor&           input,
+                   const LlamaDenseWeight& weight,
+                   const Buffer_<int>&     indices,
+                   const Buffer_<int>&     offsets,
+                   std::optional<Tensor>   output = {});
 
     void set_measure(bool measure);
 

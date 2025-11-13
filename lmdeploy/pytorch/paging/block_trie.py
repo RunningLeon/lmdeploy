@@ -15,7 +15,7 @@ logger = get_logger('lmdeploy')
 
 
 def hash_block_tokens(tokens: np.ndarray, mm_hashes: Tuple[str] = None):
-    """hash func."""
+    """Hash func."""
     if mm_hashes is None:
         mm_hashes = 'random'
     hash_data = (mm_hashes, tuple(tokens))
@@ -25,7 +25,7 @@ def hash_block_tokens(tokens: np.ndarray, mm_hashes: Tuple[str] = None):
 
 @dataclass
 class Node:
-    """node of block trie."""
+    """Node of block trie."""
     hash_key: int
     block: int
     tokens: np.ndarray
@@ -33,7 +33,7 @@ class Node:
     mm_hashes: Optional[Tuple[str]] = None
 
     def __post_init__(self):
-        """post init."""
+        """Post init."""
         self.children: Dict[int, 'Node'] = dict()
         self._parent: 'Node' = None
 
@@ -85,7 +85,7 @@ class Node:
 
 
 class BlockTrie:
-    """block trie for prefix caching."""
+    """Block trie for prefix caching."""
 
     def __init__(self, cache_config: CacheConfig, block_manager: BaseBlockManager):
         self.block_manager = block_manager
@@ -100,15 +100,15 @@ class BlockTrie:
         self.hit_rates = []
 
     def get_root(self, adapter_name: str):
-        """get root by adapter name."""
+        """Get root by adapter name."""
         if adapter_name not in self._roots:
             self._roots[adapter_name] = Node(-1, -1, None)
         return self._roots[adapter_name]
 
     @logging_timer('BlockTrie_Match', logger)
     def match(self, seq: SchedulerSequence):
-        """match sequence and cache."""
-        if seq.return_logits or not self.enable:
+        """Match sequence and cache."""
+        if not self.enable:
             return
 
         block_size = self.block_size
@@ -221,9 +221,9 @@ class BlockTrie:
             logical_blocks.last_shared_node = node
         logger.info(f'Allocate seq={seq}')
         num_matched = node.num_matched
-        num_all_ids = seq.num_all_ids
+        num_valid_ids = seq.num_valid_ids
 
-        if num_matched + block_size > num_all_ids:
+        if num_matched + block_size > num_valid_ids:
             return
 
         if len(node.children) == 0 and node.parent is not None:
@@ -236,7 +236,7 @@ class BlockTrie:
             nonlocal node, num_matched, blocks, free_blocks
 
             block_id = num_matched // block_size
-            while num_matched + block_size <= num_all_ids:
+            while num_matched + block_size <= seq.num_all_ids:
                 curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
 
                 block = logical_blocks[block_id]
@@ -266,7 +266,7 @@ class BlockTrie:
 
             block_id = num_matched // block_size
 
-            while num_matched + block_size <= num_all_ids:
+            while num_matched + block_size <= seq.num_all_ids:
                 if len(mm_ranges) > 0 and (mm_ranges[0][0] // block_size) == block_id:
                     # find last block without img_data intersect
                     last_end_num_matched = -1
@@ -387,6 +387,9 @@ class BlockTrie:
             if self.allocator.get_ref_count(parent.block) == 1:
                 access_time = self.allocator.get_access_time(parent.block)
                 heapq.heappush(leaves, (access_time, parent))
+
+        if len(self.leaves) == 0:
+            return 0
 
         evicted_blocks = []
         leaves = list(self.leaves)

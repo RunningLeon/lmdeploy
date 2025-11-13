@@ -7,10 +7,9 @@ from torch import nn
 from transformers.models.llama import LlamaConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, RopeType, SiluAndMul, build_rotary_embedding
+from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, SiluAndMul, build_rotary_embedding_from_config
 from lmdeploy.pytorch.nn.linear import (build_down_linear, build_gateup_linear, build_o_proj, build_qkv_proj,
                                         build_rowwise_linear)
-from lmdeploy.pytorch.nn.rotary_embedding import Llama3Parameters
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .utils.cudagraph import CudaGraphMixin
@@ -104,7 +103,7 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaMLP(nn.Module):
-    """llama mlp."""
+    """Llama mlp."""
 
     def __init__(self, config: LlamaConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -141,7 +140,7 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    """llama decoder layer."""
+    """Llama decoder layer."""
 
     def __init__(self, config: LlamaConfig, layer_idx: int, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -200,7 +199,7 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
-    """llama model."""
+    """Llama model."""
 
     def __init__(self, config: LlamaConfig, dtype: torch.dtype = None, device: torch.device = None):
         super().__init__()
@@ -223,41 +222,7 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
 
         # build rotary embedding in LlamaModel
-        rope_dim = config.hidden_size // config.num_attention_heads
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        scaling_factor = 1.0
-        llama3_params = None
-        rope_scaling = config.rope_scaling
-        if rope_scaling is None:
-            emb_type = RopeType.LinearScaling
-        else:
-            if 'scaling_factor' in rope_scaling:
-                scaling_factor = rope_scaling['scaling_factor']
-            elif 'factor' in rope_scaling:
-                scaling_factor = rope_scaling['factor']
-
-            rope_type = rope_scaling['rope_type']
-            if rope_type == 'dynamic':
-                emb_type = RopeType.DynamicNTKScaling
-            elif rope_type == 'linear':
-                emb_type = RopeType.LinearScaling
-            elif rope_type == 'llama3':
-                emb_type = RopeType.Llama3
-                low_freq_factor = rope_scaling.get('low_freq_factor', 1.0)
-                high_freq_factor = rope_scaling.get('high_freq_factor', 1.0)
-                llama3_params = Llama3Parameters(low_freq_factor, high_freq_factor)
-            else:
-                raise RuntimeError(f'Unsupported rope type: {rope_type}')
-
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            scaling_factor,
-            llama3_params=llama3_params,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
     def forward(
         self,
@@ -298,12 +263,12 @@ class LlamaModel(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
 class LlamaForCausalLM(nn.Module, CudaGraphMixin):
-    """rewrote model of LlamaForCausalLM."""
+    """Rewrote model of LlamaForCausalLM."""
 
     packed_modules_mapping = {
         'qkv_proj': [
@@ -343,7 +308,7 @@ class LlamaForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: torch.Tensor = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -354,16 +319,16 @@ class LlamaForCausalLM(nn.Module, CudaGraphMixin):
         return hidden_states
 
     def update_weights(self):
-        """update weights."""
+        """Update weights."""
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.lm_head(hidden_states)
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -372,7 +337,7 @@ class LlamaForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         # get input_ids, position_ids and attention metadatas
         input_ids = context.input_ids
         position_ids = context.position_ids
@@ -396,7 +361,7 @@ class LlamaForCausalLM(nn.Module, CudaGraphMixin):
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

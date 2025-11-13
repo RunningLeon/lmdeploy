@@ -9,7 +9,7 @@ from transformers.configuration_utils import PretrainedConfig
 import lmdeploy.pytorch.distributed as dist
 from lmdeploy.pytorch.distributed import get_tp_world_rank
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, RopeType, SiluAndMul, build_rotary_embedding
+from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, SiluAndMul, build_rotary_embedding_from_config
 from lmdeploy.pytorch.nn.linear import build_merged_colwise_linear, build_qkv_proj, build_rowwise_linear
 from lmdeploy.pytorch.nn.moe import SoftmaxTopK, build_fused_moe
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
@@ -225,7 +225,7 @@ class DeepseekMLP(nn.Module):
 
 
 class DeepseekDecoderLayer(nn.Module):
-    """llama decoder layer."""
+    """Llama decoder layer."""
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -309,29 +309,7 @@ class DeepseekModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
 
         # build rotary embedding
-        rope_scaling = getattr(config, 'rope_scaling', None)
-        emb_type = RopeType.LinearScaling
-        scaling_factor = 1.0
-        if rope_scaling is not None:
-            rope_type = rope_scaling['type']
-            if rope_type == 'linear':
-                emb_type = RopeType.LinearScaling
-            if rope_type == 'dynamic':
-                emb_type = RopeType.DynamicNTKScaling
-            else:
-                raise RuntimeError(f'Unsupported rope type: {rope_type}')
-            scaling_factor = rope_scaling.get('factor', scaling_factor)
-
-        rope_dim = config.hidden_size // config.num_attention_heads
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            scaling_factor,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
     def forward(
         self,
@@ -372,7 +350,7 @@ class DeepseekModel(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
@@ -417,7 +395,7 @@ class DeepseekForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: torch.Tensor = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -428,11 +406,11 @@ class DeepseekForCausalLM(nn.Module, CudaGraphMixin):
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.lm_head(hidden_states)
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -441,7 +419,7 @@ class DeepseekForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         # get input_ids, position_ids and attention metadatas
         input_ids = context.input_ids
         position_ids = context.position_ids
@@ -466,7 +444,7 @@ class DeepseekForCausalLM(nn.Module, CudaGraphMixin):
 
     def _load_weight_experts(self, name: str, loaded_weight: torch.Tensor, params_dict: Dict[str, nn.Parameter],
                              expert_params_mapping: List):
-        """load weight experts."""
+        """Load weight experts."""
         for (param_name, weight_name, expert_id, shard_id) in expert_params_mapping:
             if weight_name not in name:
                 continue
@@ -479,7 +457,7 @@ class DeepseekForCausalLM(nn.Module, CudaGraphMixin):
             load_weight(param, loaded_weight)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

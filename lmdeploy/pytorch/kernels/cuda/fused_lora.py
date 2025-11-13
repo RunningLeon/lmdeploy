@@ -5,7 +5,7 @@ import triton.language as tl
 
 
 def get_autotune_config():
-    """get autotune config."""
+    """Get autotune config."""
     return [
         triton.Config({
             'BLOCK_SIZE_M': 32,
@@ -22,7 +22,7 @@ def get_autotune_config():
 
 @triton.jit
 def _atomic_store(ptrs, val, mask):
-    """atomic store values."""
+    """Atomic store values."""
     dtype = ptrs.dtype.element_ty
     if (dtype == torch.float16) | (dtype == torch.float32):
         tl.atomic_add(ptrs, val, mask=mask, sem='relaxed')
@@ -38,8 +38,6 @@ def _atomic_store(ptrs, val, mask):
     configs=get_autotune_config(),
     key=['N', 'K'],
     restore_value=['c_ptr'],
-    warmup=5,
-    rep=20,
 )
 @triton.jit
 def _fused_lora_kernel(
@@ -69,7 +67,7 @@ def _fused_lora_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     CUM: tl.constexpr,
 ):
-    """fused lora kernel."""
+    """Fused lora kernel."""
     pid = tl.program_id(axis=0)
     bid = tl.program_id(axis=1)
 
@@ -154,7 +152,7 @@ def fused_lora(input: torch.Tensor,
                max_seqlen: int,
                output: torch.Tensor = None,
                cum: bool = False):
-    """fused lora."""
+    """Fused lora."""
 
     def grid(META):
         ret = ((triton.cdiv(max_seqlen, META['BLOCK_SIZE_M'])), batch_size)

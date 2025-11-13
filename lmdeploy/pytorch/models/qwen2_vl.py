@@ -9,14 +9,14 @@ from transformers.configuration_utils import PretrainedConfig
 from lmdeploy.pytorch.engine.input_process import BaseModelInputProcessor, PreprocessInputResult
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, FlashAttention, LayerNorm, RMSNorm, RopeType, SiluAndMul,
-                                 build_rotary_embedding)
+from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, FlashAttention, LayerNorm, RMSNorm, SiluAndMul,
+                                 build_rotary_embedding_from_config)
 from lmdeploy.pytorch.nn.linear import (build_colwise_linear, build_merged_colwise_linear, build_qkv_proj,
                                         build_rowwise_linear)
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
-from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin, next_power_of_2
-from .utils.model import DeployModelMixin
+from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin
+from .utils.model import DeployModelMixin, vlm_model
 
 
 def _apply_mrope_selection(hidden_states: torch.Tensor, mrope_position_ids: torch.Tensor, mrope_section: List[int],
@@ -164,7 +164,7 @@ class Qwen2MLP(nn.Module):
 
 
 class Qwen2DecoderLayer(nn.Module):
-    """decoder layer."""
+    """Decoder layer."""
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -251,16 +251,7 @@ class Qwen2Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
 
         # build rotary embedding
-        emb_type = RopeType.LinearScaling
-        rope_dim = config.hidden_size // config.num_attention_heads
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
     def forward(
         self,
@@ -306,7 +297,7 @@ class Qwen2Model(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
@@ -344,7 +335,7 @@ class PatchEmbed(nn.Module):
 
 
 class VisionRotaryEmbedding(nn.Module):
-    """vision rotary embedding."""
+    """Vision rotary embedding."""
 
     def __init__(self, dim: int, theta: float = 10000.0, device: torch.device = None) -> None:
         super().__init__()
@@ -524,6 +515,7 @@ class PatchMerger(nn.Module):
         return x
 
 
+@vlm_model
 class Qwen2VisionTransformerPretrainedModel(nn.Module):
     """Vision transformer."""
 
@@ -553,7 +545,7 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
                                   device=device)
 
     def rot_pos_emb(self, grid_thw):
-        """rotary position embedding."""
+        """Rotary position embedding."""
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -656,7 +648,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         image_mask: torch.Tensor = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
             if pixel_values is not None:
@@ -677,16 +669,16 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         return self.lm_head(hidden_states)
 
     def update_weights(self):
-        """update weights."""
+        """Update weights."""
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -695,7 +687,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
 
         # get input_ids, position_ids and attention metadatas
         input_ids = context.input_ids
@@ -747,7 +739,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -785,7 +777,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
                     load_weight(param, loaded_weight)
 
     def make_buffers_cudagraph(self, graph_meta: CudaGraphMeta, **kwargs):
-        """make cudagraph buffers from forward inputs."""
+        """Make cudagraph buffers from forward inputs."""
         max_tokens = graph_meta.max_tokens
 
         input_buffers = super().make_buffers_cudagraph(graph_meta=graph_meta, **kwargs)
@@ -796,16 +788,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         return input_buffers
 
     def fill_buffers_cudagraph(self, graph_meta: CudaGraphMeta, **kwargs):
-        """fill cudagraph buffers from forward inputs."""
+        """Fill cudagraph buffers from forward inputs."""
 
         new_inputs = super().fill_buffers_cudagraph(graph_meta=graph_meta, **kwargs)
 
         input_ids = kwargs.get('input_ids')
-        attn_metadata = kwargs.get('attn_metadata')
-        block_offsets = attn_metadata.block_offsets
         num_tokens = input_ids.size(-1)
-        batch_size, _ = block_offsets.size()
-        new_batch_size = next_power_of_2(batch_size)
+        new_batch_size = graph_meta.max_batchs
 
         is_decoding = graph_meta.is_decoding
         input_buffers = graph_meta.input_buffers
@@ -819,9 +808,17 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
 
         return new_inputs
 
-    def _update_model_meta_decoding(self, context: StepContext):
-        """update model meta for decoding."""
+    def _get_model_metas(self, context: StepContext):
+        """Get model metas."""
         model_metas = context.model_metas
+        if model_metas is None:
+            batch_size = context.q_seqlens.numel()
+            return [dict(mrope_delta=0)] * batch_size
+        return [dict(mrope_delta=0) if meta is None else meta for meta in model_metas]
+
+    def _update_model_meta_decoding(self, context: StepContext):
+        """Update model meta for decoding."""
+        model_metas = self._get_model_metas(context)
         position_ids = context.position_ids
 
         mrope_deltas = [meta['mrope_delta'] for meta in model_metas]
@@ -833,7 +830,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         return model_metas
 
     def _get_multimodal_pos_ids(self, grid_thw: list, device: torch.device):
-        """get mrope ids."""
+        """Get mrope ids."""
         t, h, w = grid_thw
         h //= 2
         w //= 2
@@ -844,8 +841,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
         return pos_ids
 
     def _update_model_meta_prefilling(self, context: StepContext):
-        """update model meta for prefilling."""
-        model_metas = context.model_metas
+        """Update model meta for prefilling."""
+        model_metas = self._get_model_metas(context)
         input_multimodals = context.input_multimodals
         if input_multimodals is None:
             input_multimodals = [None] * len(model_metas)
@@ -891,14 +888,14 @@ class Qwen2VLForConditionalGeneration(nn.Module, DeployModelMixin, CudaGraphMixi
                            past_key_values: List[List[torch.Tensor]],
                            inputs_embeds: Optional[torch.Tensor] = None,
                            context: StepContext = None):
-        """update model meta."""
+        """Update model meta."""
         if context.is_decoding:
             return self._update_model_meta_decoding(context)
         else:
             return self._update_model_meta_prefilling(context)
 
     def get_input_processor(self) -> BaseModelInputProcessor:
-        """get input processor."""
+        """Get input processor."""
         return self.input_processor
 
 
@@ -906,7 +903,7 @@ InputMultiModalType = List[Dict[str, Any]]
 
 
 class Qwen2VLInputProcessor(BaseModelInputProcessor):
-    """qwen2 input processor."""
+    """Qwen2 input processor."""
 
     def __init__(self, config: PretrainedConfig) -> None:
         self.config = config
@@ -915,7 +912,7 @@ class Qwen2VLInputProcessor(BaseModelInputProcessor):
                          input_ids: List[int],
                          input_multimodals: List[Dict[str, Any]] = None,
                          **kwargs) -> PreprocessInputResult:
-        """prepare multimodal input."""
+        """Prepare multimodal input."""
         if input_multimodals is None or len(input_multimodals) == 0:
             return input_ids, input_multimodals
 

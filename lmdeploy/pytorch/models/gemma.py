@@ -9,7 +9,8 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, GeluAndMul, RMSNorm, RopeType, build_rotary_embedding
+from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, GeluAndMul, RMSNorm, RopeType, build_rotary_embedding,
+                                 build_rotary_embedding_from_config)
 from lmdeploy.pytorch.nn.linear import (build_down_linear, build_gateup_linear, build_o_proj, build_qkv_proj,
                                         build_rowwise_linear)
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
@@ -56,7 +57,8 @@ class GemmaAttention(nn.Module):
         if hasattr(config, 'query_pre_attn_scalar'):
             self.scaling = config.query_pre_attn_scalar**-0.5
         if self.model_type == 'gemma3_text':
-            is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
+            sliding_window_pattern = getattr(config, 'sliding_window_pattern', 6)
+            is_sliding = bool((layer_idx + 1) % sliding_window_pattern)
             self.sliding_window = (getattr(config, 'sliding_window', -1) if is_sliding else -1)
         else:
             self.sliding_window = (getattr(config, 'sliding_window', -1) if not bool(layer_idx % 2) else -1)
@@ -239,7 +241,7 @@ class GemmaMLP(nn.Module):
 
 
 class GemmaDecoderLayer(nn.Module):
-    """llama decoder layer."""
+    """Llama decoder layer."""
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -377,37 +379,17 @@ class GemmaModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
 
         # build rotary embedding
-        rope_scaling = getattr(config, 'rope_scaling', None)
-        emb_type = RopeType.LinearScaling
-        scaling_factor = 1.0
-        if rope_scaling is not None:
-            rope_type = rope_scaling['rope_type']
-            if rope_type == 'linear':
-                emb_type = RopeType.LinearScaling
-            elif rope_type == 'dynamic':
-                emb_type = RopeType.DynamicNTKScaling
-            else:
-                raise RuntimeError(f'Unsupported rope type: {rope_type}')
-            scaling_factor = rope_scaling.get('scaling_factor', scaling_factor)
-
-        rope_dim = config.head_dim
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        self.rotary_emb = build_rotary_embedding(
-            rope_dim,
-            rope_max_pos_emb,
-            rope_base,
-            scaling_factor,
-            emb_type=emb_type,
-        )
+        self.rotary_emb = build_rotary_embedding_from_config(config)
 
         if self.model_type == 'gemma3_text':
+            rope_dim = config.head_dim
+            rope_max_pos_emb = config.max_position_embeddings
+            rope_base = config.rope_local_base_freq
             self.rotary_emb_local = build_rotary_embedding(
                 rope_dim,
                 rope_max_pos_emb,
-                config.rope_local_base_freq,
-                scaling_factor,
-                emb_type=emb_type,
+                rope_base,
+                emb_type=RopeType.Default,
             )
 
     def forward(
@@ -461,7 +443,7 @@ class GemmaModel(nn.Module):
         return hidden_states
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.embed_tokens
 
 
@@ -509,7 +491,7 @@ class GemmaForCausalLM(nn.Module, CudaGraphMixin):
         local_attn_masks: torch.Tensor = None,
         **kwargs,
     ):
-        """model forward, return logits."""
+        """Model forward, return logits."""
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -522,7 +504,7 @@ class GemmaForCausalLM(nn.Module, CudaGraphMixin):
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):
-        """compute logits of the model output."""
+        """Compute logits of the model output."""
         logits = self.lm_head(hidden_states)
         if self.final_logit_softcapping is not None:
             logits = logits / self.final_logit_softcapping
@@ -531,7 +513,7 @@ class GemmaForCausalLM(nn.Module, CudaGraphMixin):
         return logits
 
     def get_input_embeddings(self):
-        """get input embeddings."""
+        """Get input embeddings."""
         return self.model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
@@ -540,7 +522,7 @@ class GemmaForCausalLM(nn.Module, CudaGraphMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         context: StepContext = None,
     ):
-        """prepare input."""
+        """Prepare input."""
         # get input_ids, position_ids and attention metadatas
         input_ids = context.input_ids
         position_ids = context.position_ids
@@ -564,11 +546,11 @@ class GemmaForCausalLM(nn.Module, CudaGraphMixin):
         )
 
     def update_weights(self):
-        """update weights."""
+        """Update weights."""
         self.lm_head.weight = self.model.embed_tokens.weight
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """load weights."""
+        """Load weights."""
         # modify from vllm
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

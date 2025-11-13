@@ -11,7 +11,7 @@ from .utils import chunk_aligned, get_distribute_size
 
 
 def _is_w8a8(quant_config: Any):
-    """is w8a8."""
+    """Is w8a8."""
     quant_dtype = None
     w8a8_flag = False
     if quant_config is not None:
@@ -38,6 +38,7 @@ class RMSNorm(nn.Module):
         backend = get_backend()
 
         w8a8_flag, quant_dtype = _is_w8a8(quant_config)
+
         if w8a8_flag:
             builder = backend.get_layer_impl_builder(OpType.RMSNormW8A8)
         else:
@@ -58,14 +59,14 @@ class RMSNorm(nn.Module):
         self.align = align
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        """weight loader."""
+        """Weight loader."""
         world_size, rank = get_tp_world_rank()
         loaded_weight = chunk_aligned(loaded_weight, world_size, 0, self.align)[rank]
         param.copy_(loaded_weight)
 
     @staticmethod
     def create_weight(hidden_size: int, dtype: torch.dtype = None, device: torch.device = None):
-        """create weight."""
+        """Create weight."""
         if dtype is None:
             dtype = torch.float16
         if device is None:
@@ -97,7 +98,7 @@ class LayerNorm(nn.Module):
 
     @staticmethod
     def create_weight(hidden_size: int, bias: bool = True, dtype: torch.dtype = None, device: torch.device = None):
-        """create weight."""
+        """Create weight."""
         if dtype is None:
             dtype = torch.float16
         if device is None:
