@@ -931,6 +931,7 @@ class Engine(EngineBase):
         running = scheduler_output.running
         swap_in_map = scheduler_output.swap_in_map
         swap_out_map = scheduler_output.swap_out_map
+        copy_map = scheduler_output.copy_map
 
         if len(running) == 0:
             return None
@@ -949,6 +950,7 @@ class Engine(EngineBase):
             inputs=inputs,
             swap_in_map=swap_in_map,
             swap_out_map=swap_out_map,
+            copy_map=copy_map,
             loop_count=num_loops,
             sampling_inputs=sampling_inputs,
             stopping_criteria=stopping_criteria,

@@ -7,6 +7,7 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer, CLIPImageProcesso
 from lmdeploy.utils import get_logger
 from lmdeploy.vl.model.base import VISION_MODELS, VisonModel
 from lmdeploy.vl.model.utils import disable_logging
+from lmdeploy.vl.utils import hash_multimodal_data
 
 logger = get_logger('lmdeploy')
 
@@ -74,8 +75,14 @@ class InternVLVisionModel(VisonModel):
                  with_llm: bool = False,
                  max_memory: Dict[int, int] = None,
                  hf_config: AutoConfig = None,
-                 backend: str = ''):
-        super().__init__(model_path, with_llm, max_memory, hf_config, backend)
+                 backend: str = '',
+                 enable_prefix_caching: bool = False):
+        super().__init__(model_path,
+                         with_llm,
+                         max_memory,
+                         hf_config,
+                         backend,
+                         enable_prefix_caching=enable_prefix_caching)
         IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
         self.image_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
@@ -197,11 +204,15 @@ class InternVLVisionModel(VisonModel):
         for image, params in images:
             image = image.convert('RGB')
             pixel_values = self.processor(image, params)
+            hash_value = None
+            if self.enable_prefix_caching:
+                hash_value = hash_multimodal_data(model_id=self.model_path, image=image, params=params)
             image_tokens = (pixel_values.shape[0] * self.image_tokens_per_patch)
             outputs.append(
                 dict(pixel_values=pixel_values,
                      image_tokens=image_tokens,
                      image_token_id=self.image_token_id,
+                     hash_value=hash_value,
                      image_size=image.size))
         messages.append(dict(role='preprocess', content=outputs))
         return messages

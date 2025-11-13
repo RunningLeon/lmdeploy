@@ -201,18 +201,21 @@ def msg_with_rank(rank: int, msg: str):
     return f'rank[{rank}] - {msg}'
 
 
-def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict, swap_out_map: dict):
+def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict, swap_out_map: dict, copy_map: dict):
     """Perform cache swapping."""
     issued_cache_op = False
     swap_in_map = swap_in_map or dict()
     swap_out_map = swap_out_map or dict()
+    copy_map = copy_map or dict()
     if len(swap_in_map) > 0:
         cache_engine.swap_in(swap_in_map)
         issued_cache_op = True
     if len(swap_out_map) > 0:
         cache_engine.swap_out(swap_out_map)
         issued_cache_op = True
-
+    if len(copy_map) > 0:
+        cache_engine.copy_to(copy_map)
+        issued_cache_op = True
     if issued_cache_op:
         cache_engine.events.wait()
 
@@ -592,6 +595,7 @@ class BaseModelAgent:
         loop_count: int,
         swap_in_map: Dict = None,
         swap_out_map: Dict = None,
+        copy_map: Dict = None,
         sampling_inputs: SamplingInputs = None,
         stopping_criteria: StoppingCriteria = None,
         return_logits: bool = False,
@@ -699,7 +703,7 @@ class BaseModelAgent:
             # init state cache for first time prefill
             # I don't know if this is necessary...
             self.state_cache_engine.init_caches(inputs.state_offsets, inputs.history_lengths == 0)
-        cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+        cache_swapping(self.cache_engine, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
         for idx in range(loop_count):
             # inference
             logger.debug(f'<ForwardTask> rank[{rank}]: model forward [{idx}].')
@@ -995,8 +999,6 @@ class BaseModelAgent:
 
         Args:
             inputs (Dict): The input data comes from _make_inputs.
-            swap_in_map (SwapMap): Cache maps to swap in.
-            swap_out_map (SwapMap): Cache maps to swap out.
         """
         output = self._forward_impl(inputs)
         await asyncio.sleep(0)

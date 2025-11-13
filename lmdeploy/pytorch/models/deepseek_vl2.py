@@ -146,7 +146,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
         # ----------- language model ------------
         language_config = config.language_config
         self.language = DeepseekV2ForCausalLM(config=language_config, ctx_mgr=ctx_mgr, dtype=dtype, device=device)
-
+        self.config = language_config
         #  ----------- input processor ------------
         self.input_processor = DeepSeekVLV2InputProcessor(config, dtype)
 
@@ -436,6 +436,7 @@ class DeepSeekVLV2InputProcessor(BaseModelInputProcessor):
             offset = input_mm['offset']
             image_token_id = input_mm['image_token_id']
             num_pad = input_mm['image_tokens']
+            hash_value = input_mm.get('hash_value', None)
             images_spatial_crop = input_mm.get('images_spatial_crop', None)
             if isinstance(num_pad, torch.Tensor):
                 num_pad = num_pad.item()
@@ -445,6 +446,7 @@ class DeepSeekVLV2InputProcessor(BaseModelInputProcessor):
                                        end=offset + num_pad,
                                        meta=dict(
                                            image_token_id=image_token_id,
+                                           hash_value=hash_value,
                                            images_spatial_crop=images_spatial_crop,
                                        ))
 

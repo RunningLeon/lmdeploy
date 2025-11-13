@@ -56,9 +56,8 @@ class SchedulerSequenceDefault(SchedulerSequence):
         """Set step."""
         num_all_ids = self.num_all_ids
         # update step for vlm
-        if len(self.history_embeddings) > 0:
-            new_step, self._num_history_images, self._num_images = \
-                self.history_embeddings.get_step(step)
+        if self.history_multimodals is not None:
+            new_step = self.history_multimodals.get_step(step)
             assert 0 <= new_step <= step
             step = new_step
         self._num_history_ids = step
