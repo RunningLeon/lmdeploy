@@ -993,6 +993,10 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
                                                           res.finish_reason,
                                                           routed_experts=routed_experts)
             yield f'data: {response_json}\n\n'
+
+        if request.auto_end_session:
+            await VariableInterface.async_engine.end_session(session_id=request.session_id)
+
         yield 'data: [DONE]\n\n'
 
     if request.stream:
@@ -1021,6 +1025,10 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
                                      routed_experts=res.routed_experts,
                                      completion_tokens=res.generate_token_len)
         response = GenerateReqOutput(text=text, output_ids=output_ids, meta_info=meta)
+
+        # explicitly auto end session
+        if request.auto_end_session is True:
+            await VariableInterface.async_engine.end_session(session_id=request.session_id)
 
     await _inner_call()
     return response

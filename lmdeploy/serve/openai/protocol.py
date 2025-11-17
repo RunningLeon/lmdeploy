@@ -443,6 +443,7 @@ class GenerateReqInput(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     include_stop_str_in_output: Optional[bool] = False
     return_routed_experts: Optional[bool] = False
+    auto_end_session: Optional[bool] = False
 
 
 class GenerateReqMetaOutput(BaseModel):
