@@ -1132,6 +1132,9 @@ def update_params(request: UpdateParamsRequest, raw_request: Request = None):
 @router.post('/sleep', dependencies=[Depends(check_api_key)])
 async def sleep(raw_request: Request = None):
     level = raw_request.query_params.get('level', '1')
+    if str(level) == '2':
+        await VariableInterface.async_engine.stop_all_session()
+        await VariableInterface.async_engine.end_all_session()
     VariableInterface.async_engine.sleep(int(level))
     return Response(status_code=200)
 

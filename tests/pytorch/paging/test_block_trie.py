@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lmdeploy.pytorch.config import CacheConfig, SchedulerConfig
-from lmdeploy.pytorch.messages import SequenceMeta
+from lmdeploy.pytorch.messages import SamplingParam, SequenceMeta
 from lmdeploy.pytorch.paging import Scheduler
 
 
@@ -56,6 +56,41 @@ class TestBlockTire:
     @pytest.fixture
     def block_trie(self, scheduler):
         yield scheduler.block_trie
+
+    def test_with_routed_experts(self, block_trie, block_mgr, scheduler):
+
+        def _get_routed_experts(size, value):
+            return np.full((size, 4, 8), value, dtype=np.int32)
+
+        sess = scheduler.add_session(0)
+        block_size = sess.seq_meta.block_size
+        token_ids = ([1] * block_size + [2] * block_size)
+        all_routed_experts = [_get_routed_experts(block_size, 1), _get_routed_experts(block_size, 2)]
+        token_ids += [3] * (block_size // 2)
+        all_routed_experts += [_get_routed_experts(block_size // 2, 3)]
+        seq = sess.add_sequence(token_ids, sampling_param=SamplingParam(return_routed_experts=True))
+        all_routed_experts += [_get_routed_experts(block_size - 1, 4)]
+        routed_experts = np.concatenate(all_routed_experts, axis=0)
+        seq.update_token_ids([4] * block_size, routed_experts=routed_experts)
+
+        # test allocate
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+        node = getattr(seq.logical_blocks, 'last_shared_node', None)
+        assert node is not None
+        assert node.routed_experts is not None
+        target_routed_experts = np.concatenate(
+            [_get_routed_experts(block_size // 2, 3),
+             _get_routed_experts(block_size // 2, 4)], axis=0)
+        assert np.array_equal(node.routed_experts, target_routed_experts)
+
+        # test match
+        seq_query = sess.add_sequence(token_ids, sampling_param=SamplingParam(return_routed_experts=True))
+        block_trie.match(seq_query)
+        assert seq_query.all_routed_experts is not None
+        assert len(seq_query.all_routed_experts) == block_size * 2
+        assert np.array_equal(seq_query.all_routed_experts.get_real(), np.concatenate(all_routed_experts[:2], axis=0))
+
 
     def test_allocate(self, block_trie, block_mgr, scheduler):
         allocator = block_trie.allocator
@@ -156,3 +191,37 @@ class TestBlockTire:
         new_leaf = next(iter(block_trie.leaves))
         assert leaf != new_leaf
         assert block_mgr.get_num_free_gpu_blocks() == 5
+
+    def test_reset(self, block_trie, block_mgr, scheduler, num_gpu_blocks):
+        allocator = block_trie.allocator
+        sess = scheduler.add_session(0)
+        block_size = sess.seq_meta.block_size
+
+        # initialize cache
+        token_ids = ([1] * block_size + [2] * block_size)
+        token_ids += [3] * (block_size // 2)
+        seq = sess.add_sequence(token_ids)
+        block_mgr.allocate(seq)
+        block_trie.allocate(seq)
+
+        token_ids = ([1] * block_size + [3] * block_size)
+        seq1 = sess.add_sequence(token_ids)
+        block_trie.match(seq1)
+        block_mgr.allocate(seq1)
+        block_trie.allocate(seq1)
+
+        ref_cnt = allocator.get_ref_count(seq.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [3, 2, 1])
+        ref_cnt = allocator.get_ref_count(seq1.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [3, 2])
+        block_trie.reset()
+        assert len(block_trie.leaves) == 0
+        ref_cnt = allocator.get_ref_count(seq.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [2, 1, 1])
+        ref_cnt = allocator.get_ref_count(seq1.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [2, 1])
+        block_mgr.free(seq)
+        ref_cnt = allocator.get_ref_count(seq1.logical_blocks.get_real_blocks())
+        assert np.array_equal(ref_cnt, [1, 1])
+        block_mgr.free(seq1)
+        assert block_mgr.get_num_free_gpu_blocks() == num_gpu_blocks

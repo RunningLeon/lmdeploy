@@ -498,6 +498,17 @@ class AsyncEngine(LogitsMixin):
         finally:
             self._get_free_insts().put_nowait(inst)
 
+    async def end_all_session(self):
+        """End all sessions."""
+        logger.info('end all sessions')
+        tasks = []
+        session_ids = []
+        for session_id in list(self.id2inst.keys()):
+            session_ids.append(session_id)
+            tasks.append(self.end_session(session_id))
+        await asyncio.gather(*tasks)
+        logger.info(f'all {len(session_ids)} sessions are ended')
+
     def sleep(self, level: int = 1):
         """Sleep the model.
 
