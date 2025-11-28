@@ -86,6 +86,9 @@ class DeployModelMixinV1(DeployModelMixin):
                       device: Optional[torch.device] = None,
                       **kwargs):
         """Build LM Head."""
+        bm_ctx = get_build_model_context()
+        self.config.enforce_fp32_head = bm_ctx.enforce_fp32_head
+        dtype = torch.float32 if self.config.enforce_fp32_head else dtype
         lm_head = build_rowwise_linear(
             hidden_size,
             vocab_size,
@@ -94,12 +97,6 @@ class DeployModelMixinV1(DeployModelMixin):
             device=device,
             **kwargs,
         )
-        bm_ctx = get_build_model_context()
-        self.config.enforce_fp32_head = bm_ctx.enforce_fp32_head
-        if self.config.enforce_fp32_head:
-            lm_head.weight.data = lm_head.weight.data.to(dtype=torch.float32)
-            if lm_head.bias is not None:
-                lm_head.bias.data = lm_head.bias.data.to(dtype=torch.float32)
         return lm_head
 
 
