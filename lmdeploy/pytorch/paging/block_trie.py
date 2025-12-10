@@ -154,12 +154,29 @@ class BlockTrie:
         block_size = self.block_size
         logical_blocks = seq.logical_blocks
         node: Node = getattr(logical_blocks, 'last_shared_node', None)
+
         if node is None:
             node = self.get_root(seq.adapter_name)
             logical_blocks.last_shared_node = node
 
         num_matched = node.num_matched
         num_valid_ids = seq.num_valid_ids
+
+        # fill routed experts on block trie
+        if len(seq.all_routed_experts) >= (node.num_matched - 1) > 0:
+            tmp_node = node
+            while tmp_node.parent is not None and tmp_node.routed_experts is None:
+                tmp_node.routed_experts = seq.all_routed_experts.get_real()[tmp_node.num_matched -
+                                                                            block_size:tmp_node.num_matched]
+                tmp_node = tmp_node.parent
+
+        # fill routed experts on seq
+        if len(seq.all_routed_experts) < (node.num_matched - 1):
+            tmp_node = node
+            while tmp_node.parent is not None and tmp_node.routed_experts is not None and len(
+                    seq.all_routed_experts) < (seq.num_valid_ids - 1):
+                seq.all_routed_experts.append(tmp_node.routed_experts, start=tmp_node.num_matched - block_size)
+                tmp_node = tmp_node.parent
 
         if num_matched + block_size > num_valid_ids:
             return
@@ -172,8 +189,6 @@ class BlockTrie:
         free_blocks = []
         while num_matched + block_size <= num_valid_ids:
             curr_tokens = seq.history_cache[num_matched:num_matched + block_size]
-            routed_experts = seq.all_routed_experts.get_real()[num_matched:num_matched +
-                                                               block_size] if seq.return_routed_experts else None
             block = logical_blocks[block_id]
 
             hash_key = hash(('random', tuple(curr_tokens)))
@@ -186,6 +201,8 @@ class BlockTrie:
                 free_blocks.append(block)
                 logical_blocks[block_id] = node.block
             else:
+                routed_experts = seq.all_routed_experts.get_real()[num_matched:num_matched + block_size] if len(
+                    seq.all_routed_experts) >= (num_matched + block_size - 1) else None
                 node = Node(hash_key=hash_key,
                             block=block,
                             tokens=curr_tokens,

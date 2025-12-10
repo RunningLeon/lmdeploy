@@ -454,22 +454,20 @@ class HistoryRouterExperts:
             return None
         return self._expert_ids[:self._num_real]
 
-    def resize(self, size: int):
-        """Set size."""
-        assert size <= self._num_real
-        self._num_real = size
+    def reset(self):
         if self._expert_ids is not None:
-            self._expert_ids = self._expert_ids[:size].copy()
+            self._expert_ids = self._expert_ids[:0].copy()
+        self._num_real = 0
 
-    def append(self, expert_ids: np.ndarray):
+    def append(self, expert_ids: np.ndarray, start: int = 0):
         """Append token ids."""
         if self._expert_ids is None:
-            self._expert_ids = expert_ids.astype(self.dtype)
             self._num_real = len(expert_ids)
+            self._expert_ids = np.pad(expert_ids.astype(self.dtype), ((0, start + self._num_real), (0, 0), (0, 0)))
             return
         num_tokens = len(expert_ids)
-        self.reserve(num_tokens + self._num_real)
-        slice_start = self._num_real
+        self.reserve(start + num_tokens)
+        slice_start = start
         slice_end = slice_start + num_tokens
         self._num_real += num_tokens
         self._expert_ids[slice_start:slice_end] = expert_ids
@@ -477,16 +475,6 @@ class HistoryRouterExperts:
     def __len__(self):
         """Get length."""
         return self._num_real
-
-    def clone(self):
-        """clone."""
-        expert_ids = None if self._expert_ids is None else self.get_real().copy()
-        ret = HistoryRouterExperts(expert_ids=expert_ids, dtype=self.dtype)
-        return ret
-
-    def copy(self):
-        """copy."""
-        return self.clone()
 
 
 class HistoryMultiModals:
@@ -658,10 +646,10 @@ class SchedulerSequence:
 
     @property
     def routed_experts(self) -> np.ndarray:
-        if (not self.return_routed_experts) or self.all_routed_experts is None:
+        if not self.return_routed_experts:
             return None
 
-        end = max(0, self.num_all_ids - 1)
+        end = max(0, self.num_valid_ids - 1)
         if 0 < end <= len(self.all_routed_experts):
             return self.all_routed_experts.get_real()[:end]
         else:

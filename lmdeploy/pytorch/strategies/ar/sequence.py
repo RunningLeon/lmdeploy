@@ -41,7 +41,7 @@ class SchedulerSequenceDefault(SchedulerSequence):
         # record cached expert ids
         if self.return_routed_experts:
             if routed_experts is not None:
-                self.all_routed_experts.append(routed_experts)
+                self.all_routed_experts.append(routed_experts, start=self.num_history_ids)
 
         if mode == UpdateTokenMode.INPUTS:
             self.arrive_time = time.perf_counter()
@@ -80,10 +80,15 @@ class SchedulerSequenceDefault(SchedulerSequence):
             self._num_cross = self.history_multimodals.get_encoder_len(self._num_history_ids, num_all_ids)
 
         if self.return_routed_experts:
-            if routed_experts is not None:
-                self.all_routed_experts.append(routed_experts)
-            else:
-                self.all_routed_experts.resize(step)
+            if step <= 0:
+                self.all_routed_experts.reset()
+            elif routed_experts is not None:
+                num_experts = routed_experts.shape[0]
+                start = self.num_history_ids - num_experts
+                if num_experts % self.block_size != 0:
+                    start -= 1
+                assert start >= 0
+                self.all_routed_experts.append(routed_experts, start=start)
 
 
 class ARSequenceStrategy(SequenceStrategy):
