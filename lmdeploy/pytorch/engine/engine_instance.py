@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Any, Dict, List
+from typing import Any
 
 from lmdeploy.messages import EngineOutput, GenerationConfig
 from lmdeploy.utils import get_logger
@@ -11,7 +11,7 @@ from .request import RequestSender, RequestType, Response, ResponseType
 
 logger = get_logger('lmdeploy')
 
-InputMultiModalType = List[Dict[str, Any]]
+InputMultiModalType = list[dict[str, Any]]
 
 
 def _check_resp(resp: Response, state: ResponseType, warning_msg: str = None):
@@ -72,6 +72,50 @@ def cancel(req_sender: RequestSender, session_id: int):
                                f'Error: {resp.type}.'))
 
 
+class SharedStore:
+    def __init__(self):
+        self._data = {}
+
+    def put(self, data):
+        import ray
+        ref = ray.put(data)
+        key = ref.hex()
+        self._data[key] = ref
+        return key
+
+    def get(self, key):
+        import ray
+        ref = self._data.pop(key)
+        return ray.get(ref)
+
+    def clear(self):
+        import ray
+        all_data = list(self._data.values())
+        if len(all_data) > 0:
+            ray.internal.free(all_data, local_only=False)
+
+
+_SHARED_STORE = None
+
+
+def _lazy_create_ray_store():
+    global _SHARED_STORE
+    if _SHARED_STORE is None:
+        import ray
+        name = 'shared_store'
+        try:
+            _SHARED_STORE = ray.get_actor(name, namespace='lmdeploy')
+        except ValueError:
+            try:
+                _SHARED_STORE = ray.remote(num_cpus=0,)(SharedStore).options(
+                    name=name,
+                    namespace='lmdeploy',
+                    lifetime='detached',
+                ).remote()
+            except ray.exceptions.ActorAlreadyExistsError:
+                _SHARED_STORE = ray.get_actor(name, namespace='lmdeploy')
+
+
 class EngineInstance(EngineInstanceBase):
     """Instance of TurboMind.
 
@@ -86,23 +130,28 @@ class EngineInstance(EngineInstanceBase):
         self.max_input_len = self.engine.max_session_len
         self._enable_transfer_obj_ref = engine.engine_config.enable_transfer_obj_ref and \
             engine.engine_config.distributed_executor_backend == 'ray'
+        if self._enable_transfer_obj_ref:
+            _lazy_create_ray_store()
 
     def __del__(self):
         """Destructor."""
         self.engine.req_manager.senders.pop(self.req_sender.sender_id)
 
-    def _get_extra_outputs(self, resp: Response):
+    def _get_extra_outputs(self, resp: Response, num_all_ids: int):
         """Get extra outputs."""
         outputs = dict(routed_experts=None)
         routed_experts = resp.data.get('routed_experts', None) if resp.data else None
         if routed_experts is not None and resp.type in [ResponseType.FINISH, ResponseType.CANCEL]:
             if self._enable_transfer_obj_ref:
-                import pybase64
                 import ray
-
-                ref = ray.put(routed_experts)
-                data = ray.cloudpickle.dumps(ref)
-                outputs['routed_experts'] = pybase64.b64encode(data).decode('utf-8')
+                # validate experts
+                num_expected_experts = num_all_ids - 1
+                if routed_experts.shape[0] != num_expected_experts:
+                    logger.warning(f'Expected number of routed_experts: {num_expected_experts}, '
+                                   f'but got {routed_experts.shape[0]}')
+                    routed_experts = routed_experts[:num_expected_experts]
+                key = ray.get(_SHARED_STORE.put.remote(routed_experts))
+                outputs['routed_experts'] = key
             else:
                 outputs['routed_experts'] = routed_experts
         return outputs
@@ -125,22 +174,23 @@ class EngineInstance(EngineInstanceBase):
 
     async def async_stream_infer(self,
                                  session_id: int,
-                                 input_ids: List[int],
+                                 input_ids: list[int],
                                  gen_config: GenerationConfig = None,
                                  multimodal: InputMultiModalType = None,
                                  adapter_name: str = None,
+                                 notify_add_msg_func = None,
                                  **kwargs):
         """Send stream inference request.
 
         Args:
             session_id (int): The session id.
-            input_ids (List[int]): The input token ids.
+            input_ids (list[int]): The input token ids.
             gen_config (GenerationConfig): The sampling parameters.
             adapter_name (str): The lora adapter name.
 
         Yields:
             int: Error flags. 0 if success.
-            List[int]: The streaming output tokens.
+            list[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
         if len(input_ids) > self.max_input_len:
@@ -162,7 +212,12 @@ class EngineInstance(EngineInstanceBase):
         )
         logger.debug(f'session[{session_id}] add message: num_input_ids={len(input_ids)}.')
         resp = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
+        # notify add msg
+        if notify_add_msg_func is not None:
+            notify_add_msg_func()
+
         output_offset = 0
+        prompt_ids_len = len(input_ids)
 
         while True:
             resp = await self.req_sender.async_recv(resp, wait_main=True)
@@ -170,8 +225,6 @@ class EngineInstance(EngineInstanceBase):
             cache_block_ids = resp.data.get('cache_block_ids', None) if resp.data else None
             req_metrics = resp.data.get('req_metrics', None) if resp.data else None
             logprobs = resp.data.pop('logprobs', None) if resp.data else None
-            extra_outputs = self._get_extra_outputs(resp)
-            routed_experts = extra_outputs.get('routed_experts', None)
 
             if resp.type == ResponseType.SUCCESS:
                 token_ids = resp.data['token_ids']
@@ -181,19 +234,24 @@ class EngineInstance(EngineInstanceBase):
                                    token_ids[output_offset:].tolist(),
                                    cache_block_ids=cache_block_ids,
                                    req_metrics=req_metrics,
-                                   routed_experts=routed_experts,
                                    logprobs=logprobs)
                 output_offset = len(token_ids)
             elif resp.type in (ResponseType.FINISH, ResponseType.CANCEL):
                 resp_data = resp.data
-                if resp_data is None:
+                token_ids = []
+                logits = None
+                if resp_data is not None:
                     # request might be cancelled before any output
-                    token_ids = []
-                    logits = None
-                else:
-                    token_ids = resp_data['token_ids'][output_offset:].tolist()
                     logits = resp_data.get('logits', None)
-                num_ids = len(token_ids) - output_offset
+                    gen_token_ids = resp_data.get('token_ids', None)
+                    if gen_token_ids is not None:
+                        token_ids = gen_token_ids[output_offset:].tolist()
+
+                num_ids = len(token_ids)
+                num_all_ids = prompt_ids_len + output_offset + num_ids
+                extra_outputs = self._get_extra_outputs(resp, num_all_ids)
+                routed_experts = extra_outputs.get('routed_experts', None)
+
                 logger.debug(f'session[{session_id}] finish: num_out_ids={num_ids}.')
                 yield EngineOutput(resp.type,
                                    token_ids,
@@ -210,7 +268,7 @@ class EngineInstance(EngineInstanceBase):
 
     async def async_infer(self,
                           session_id: int,
-                          input_ids: List[int] = None,
+                          input_ids: list[int] = None,
                           multimodal: InputMultiModalType = None,
                           gen_config: GenerationConfig = None,
                           **kwargs):
@@ -218,12 +276,12 @@ class EngineInstance(EngineInstanceBase):
 
         Args:
             session_id (int): The session id.
-            input_ids (List[int]): The input token ids.
+            input_ids (list[int]): The input token ids.
             gen_config (GenerationConfig): The sampling parameters.
 
         Returns:
             int: Error flags. 0 if success.
-            List[int]: The streaming output tokens.
+            list[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
         async for outputs in self.async_stream_infer(session_id,
@@ -239,7 +297,7 @@ class EngineInstance(EngineInstanceBase):
 
     def stream_infer(self,
                      session_id: int,
-                     input_ids: List[int],
+                     input_ids: list[int],
                      multimodal: InputMultiModalType = None,
                      gen_config: GenerationConfig = None,
                      adapter_name: str = None,
@@ -248,13 +306,13 @@ class EngineInstance(EngineInstanceBase):
 
         Args:
             session_id (int): The session id.
-            input_ids (List[int]): The input token ids.
+            input_ids (list[int]): The input token ids.
             gen_config (GenerationConfig): The sampling parameters.
             adapter_name (str): The lora adapter name.
 
         Yields:
             int: Error flags. 0 if success.
-            List[int]: The streaming output tokens.
+            list[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
 
@@ -276,7 +334,7 @@ class EngineInstance(EngineInstanceBase):
 
     def infer(self,
               session_id: int,
-              input_ids: List[int] = None,
+              input_ids: list[int] = None,
               multimodal: InputMultiModalType = None,
               gen_config: GenerationConfig = None,
               **kwargs):
@@ -284,12 +342,12 @@ class EngineInstance(EngineInstanceBase):
 
         Args:
             session_id (int): The session id.
-            input_ids (List[int]): The input token ids.
+            input_ids (list[int]): The input token ids.
             gen_config (GenerationConfig): The sampling parameters.
 
         Returns:
             int: Error flags. 0 if success.
-            List[int]: The streaming output tokens.
+            list[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
         return self.req_sender.run_until_complete(

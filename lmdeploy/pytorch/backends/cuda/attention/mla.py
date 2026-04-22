@@ -4,6 +4,7 @@ import functools
 
 import torch
 
+from lmdeploy.messages import QuantPolicy
 from lmdeploy.utils import get_logger
 
 from .default import TritonAttentionImpl, TritonAttentionMetadata
@@ -74,7 +75,7 @@ class NSAIndicesUpdater:
         return self._update_prefill_func(nsa_indices, q_seqlens, cu_seqlens_k)
 
     @staticmethod
-    @functools.lru_cache(maxsize=None)
+    @functools.cache
     def build():
         return NSAIndicesUpdater()
 
@@ -190,7 +191,7 @@ class FlashMLAImpl(TritonAttentionImpl):
                                                      is_fp8_kvcache=is_fp8_kvcache,
                                                      indices=nsa_indices)
 
-        attn_output = attn_output.squeeze(1)
+        attn_output = attn_output.flatten(0, 1)
         return attn_output
 
     def _prefill_sparse(self, query: torch.Tensor, flatten_k: torch.Tensor, nsa_indices: torch.Tensor,
@@ -405,7 +406,7 @@ class FlashMLAImpl(TritonAttentionImpl):
         block_offsets = attn_metadata.block_offsets
         kv_seqlens = attn_metadata.kv_seqlens
         quant_policy = attn_metadata.quant_policy
-        assert quant_policy == 0
+        assert quant_policy == QuantPolicy.NONE
 
         # fill seqlen args
         fill_seqlens, fill_max_q_seqlen, fill_q_start_loc = self._get_fill_meta(

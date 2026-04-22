@@ -2,8 +2,8 @@
 # modify from: https://github.com/vllm-project/vllm
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 import torch
 
@@ -11,13 +11,18 @@ from lmdeploy.pytorch.backends import get_backend
 from lmdeploy.pytorch.disagg.backend.backend import MIGRATION_BACKENDS
 from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl
 from lmdeploy.pytorch.disagg.conn.protocol import DistServeInitRequest, DistServeKVTransferEndpointInfo
-from lmdeploy.pytorch.disagg.messages import (AssignmentInstruct, DistServeRegisterMRMessage, MigrationAssignment,
-                                              MigrationExecutionBatch)
+from lmdeploy.pytorch.disagg.messages import (
+    AssignmentInstruct,
+    DistServeRegisterMRMessage,
+    MigrationAssignment,
+    MigrationExecutionBatch,
+)
 from lmdeploy.utils import get_logger
 
+from ...messages import QuantPolicy
 from ..config import CacheConfig, ModelConfig
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+KVCache = tuple[torch.Tensor, torch.Tensor]
 
 logger = get_logger('lmdeploy')
 
@@ -30,7 +35,7 @@ def round_up(x: int, alignment: int) -> int:
 @dataclass
 class CacheDesc:
     """Cache description."""
-    shape: List[int]
+    shape: list[int]
     dtype: torch.dtype
     alignment: int = 256
 
@@ -79,7 +84,7 @@ class CacheEngine:
         self.cache_config = cache_config
         self.model_config = model_config
 
-        self.block_size = cache_config.block_size
+        self.block_size = cache_config.kernel_block_size
         self.num_layers = model_config.num_layers
         self.kv_cache_dtype = _get_kv_cache_dtype(self.model_config)
 
@@ -98,7 +103,7 @@ class CacheEngine:
         self.local_gpu_cache = self.allocate_gpu_cache()
         self.local_cpu_cache = self.allocate_cpu_cache()
 
-        self.migration_backend_impl: Optional[MigrationBackendImpl] = None
+        self.migration_backend_impl: MigrationBackendImpl | None = None
 
         # Initialize the stream for caching operations.
         self.cache_stream = cache_stream or torch.cuda.Stream()
@@ -135,7 +140,7 @@ class CacheEngine:
                                   block_size: int,
                                   head_size: int,
                                   world_size: int = 1,
-                                  quant_policy: Literal[0, 4, 8] = 0):
+                                  quant_policy: QuantPolicy = QuantPolicy.NONE):
         """Get single block shape."""
         attn_backend = get_backend()
         dtype = model_config.dtype
@@ -150,7 +155,8 @@ class CacheEngine:
         if model_config.use_mla_fp8_cache:
             return (block_size, num_heads, MLA_FP8_HEAD_DIM)
 
-        if quant_policy == 4:  # pack head_dim to uint8
+        # pack head_dim to uint8 (4-bit)
+        if quant_policy == QuantPolicy.INT4 or quant_policy == QuantPolicy.TURBO_QUANT:
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2
@@ -162,7 +168,7 @@ class CacheEngine:
                                     block_size: int,
                                     head_size: int,
                                     world_size: int = 1,
-                                    quant_policy: Literal[0, 4, 8] = 0):
+                                    quant_policy: QuantPolicy = QuantPolicy.NONE):
         """Get single block shape."""
         attn_backend = get_backend()
         dtype = model_config.dtype
@@ -178,7 +184,11 @@ class CacheEngine:
             # flash mla shared key and value
             return (block_size, num_heads, 0)
 
-        if quant_policy == 4:  # pack head_dim to uint8
+        if quant_policy == QuantPolicy.TURBO_QUANT:  # pack head_dim to uint8 (2-bit for V cache)
+            assert head_size % 4 == 0, \
+                f'head_size: {head_size}, quant_policy: {quant_policy}'
+            head_size = head_size // 4
+        elif quant_policy == QuantPolicy.INT4:  # pack head_dim to uint8 (4-bit)
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2
@@ -193,14 +203,14 @@ class CacheEngine:
             head_size = model_config.head_dim
         shape = cls._get_key_block_shape_impl(
             model_config,
-            block_size=cache_config.block_size,
+            block_size=cache_config.kernel_block_size,
             head_size=head_size,
             world_size=world_size,
             quant_policy=cache_config.quant_policy,
         )
         shape = list(shape)
         dtype = _get_kv_cache_dtype(model_config)
-        if cache_config.quant_policy in (4, 8):
+        if cache_config.quant_policy in (QuantPolicy.INT4, QuantPolicy.INT8, QuantPolicy.TURBO_QUANT):
             dtype = torch.uint8
         return CacheDesc(shape=shape, dtype=dtype)
 
@@ -212,14 +222,14 @@ class CacheEngine:
             head_size = model_config.head_dim
         shape = cls._get_value_block_shape_impl(
             model_config,
-            block_size=cache_config.block_size,
+            block_size=cache_config.kernel_block_size,
             head_size=head_size,
             world_size=world_size,
             quant_policy=cache_config.quant_policy,
         )
         shape = list(shape)
         dtype = _get_kv_cache_dtype(model_config)
-        if cache_config.quant_policy in (4, 8):
+        if cache_config.quant_policy in (QuantPolicy.INT4, QuantPolicy.INT8, QuantPolicy.TURBO_QUANT):
             dtype = torch.uint8
         return CacheDesc(shape=shape, dtype=dtype)
 
@@ -227,23 +237,29 @@ class CacheEngine:
     def get_quant_cache_descs(cls, k_cache_desc: CacheDesc, v_cache_desc: CacheDesc, model_config: ModelConfig,
                               cache_config: CacheConfig):
         """Get quant cache descs."""
-        if cache_config.quant_policy == 0:
+        if cache_config.quant_policy == QuantPolicy.NONE:
             return []
 
         dtype = model_config.dtype
-        key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
-        val_scale_zero_shape = v_cache_desc.shape[:-1] + [2]
+        # For quant_policy==QuantPolicy.TURBO_QUANT, K uses 4-bit quantization (has MSE norm and QJL norm),
+        # V uses 2-bit quantization (only has MSE norm)
+        if cache_config.quant_policy == QuantPolicy.TURBO_QUANT:
+            key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
+            val_scale_zero_shape = v_cache_desc.shape[:-1] + [1]
+        else:
+            key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
+            val_scale_zero_shape = v_cache_desc.shape[:-1] + [2]
         key_scale_zero_desc = CacheDesc(shape=key_scale_zero_shape, dtype=dtype)
         val_scale_zero_desc = CacheDesc(shape=val_scale_zero_shape, dtype=dtype)
         return [key_scale_zero_desc, val_scale_zero_desc]
 
     @classmethod
-    def get_custom_cache_descs(cls, model_config: ModelConfig, cache_config: CacheConfig) -> List[CacheDesc]:
+    def get_custom_cache_descs(cls, model_config: ModelConfig, cache_config: CacheConfig) -> list[CacheDesc]:
         """Get custom cache descs."""
         if len(model_config.cache_shapes) == 0:
             return []
 
-        block_size = cache_config.block_size
+        block_size = cache_config.kernel_block_size
 
         descs = []
         for shape, dtype in model_config.cache_shapes:
@@ -258,6 +274,10 @@ class CacheEngine:
         """Allocate caches."""
 
         num_layers = model_config.num_layers
+        if cache_config.block_size < cache_config.kernel_block_size:
+            raise ValueError(f'block_size {cache_config.block_size} must be greater than or equal to kernel_block_size {cache_config.kernel_block_size}.')  # noqa
+        kernel_blocks_per_kv = cache_config.block_size // cache_config.kernel_block_size
+        num_blocks *= kernel_blocks_per_kv
 
         # get all descs
         k_cache_desc = cls.get_k_cache_desc(model_config, cache_config, world_size)
@@ -310,7 +330,7 @@ class CacheEngine:
         return self.local_cpu_cache
 
     @staticmethod
-    def get_custom_cache_shape_impl(num_layers: int, num_blocks: int, block_size: int, shape: List[int]):
+    def get_custom_cache_shape_impl(num_layers: int, num_blocks: int, block_size: int, shape: list[int]):
         """Get single block shape."""
         return (num_layers, num_blocks, block_size, *shape)
 
@@ -335,13 +355,13 @@ class CacheEngine:
         return custom_caches
 
     @torch.inference_mode()
-    def _swap(self, src: List[torch.Tensor], dst: List[torch.Tensor], src_to_dst: Dict[int, int]):
+    def _swap(self, src: list[torch.Tensor], dst: list[torch.Tensor], src_to_dst: dict[int, int]):
         """Move caches from src memory to dst memory.
 
         Args:
-            src (List[KVCache]): Source cache.
-            dst (List[KVCache]): Destination cache.
-            src_to_dst (Dict[int, int]): Map between src and dst.
+            src (list[KVCache]): Source cache.
+            dst (list[KVCache]): Destination cache.
+            src_to_dst (dict[int, int]): Map between src and dst.
         """
         BLOCKS_PER_COPY = 2
         num_copy = len(src_to_dst)
@@ -357,19 +377,19 @@ class CacheEngine:
                     dcache.index_copy_(1, didx, sdata.to(dcache.device))
             self.events.record(stream=self.cache_stream)
 
-    def swap_in(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_in(self, src_to_dst: dict[int, int]) -> None:
         """Move cache from Host to Device.
 
         Args:
-            src_to_dst (Dict[int, int]): Map between src and dst.
+            src_to_dst (dict[int, int]): Map between src and dst.
         """
         self._swap([self.full_cpu_cache], [self.full_gpu_cache], src_to_dst)
 
-    def swap_out(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_out(self, src_to_dst: dict[int, int]) -> None:
         """Move cache from Device to Host.
 
         Args:
-            src_to_dst (Dict[int, int]): Map between src and dst.
+            src_to_dst (dict[int, int]): Map between src and dst.
         """
         self._swap([self.full_gpu_cache], [self.full_cpu_cache], src_to_dst)
 
@@ -417,7 +437,7 @@ class CacheEngine:
                                                        migration_init_request.remote_engine_id,
                                                        migration_init_request.protocol)))
 
-    def p2p_connect(self, remote_engine_id: str, migration_conn_request: List[DistServeKVTransferEndpointInfo]):
+    def p2p_connect(self, remote_engine_id: str, migration_conn_request: list[DistServeKVTransferEndpointInfo]):
         self.migration_backend_impl.p2p_connect(remote_engine_id, migration_conn_request[self.tp_rank])
 
     async def migrate(self, migration_execution_inputs: MigrationExecutionBatch):
@@ -434,7 +454,7 @@ class CacheEngine:
                 for block_id in block_ids
             ]
 
-        assignment_batch: List[Tuple[str, int, int, int]] = []  # mr_key, target, source, offset
+        assignment_batch: list[tuple[str, int, int, int]] = []  # mr_key, target, source, offset
         for migration_exe_req in migration_execution_inputs.requests:
             remote_engine_id = migration_exe_req[0]
             blocks_to_migration = migration_exe_req[1]
@@ -466,7 +486,7 @@ class StateCacheEngine:
                                                                  device='cuda')
 
     @staticmethod
-    def allocate_caches(num_caches: int, state_shapes: List[Tuple[Tuple[int], torch.dtype]], device: torch.device):
+    def allocate_caches(num_caches: int, state_shapes: list[tuple[tuple[int], torch.dtype]], device: torch.device):
         """Allocate cache implement."""
 
         if len(state_shapes) == 0 or num_caches == 0:
@@ -492,11 +512,11 @@ class StateCacheEngine:
         return mem_pool, caches
 
     @staticmethod
-    def get_cache_state_size(state_shapes: List[Tuple[Tuple[int], torch.dtype]]) -> int:
+    def get_cache_state_size(state_shapes: list[tuple[tuple[int], torch.dtype]]) -> int:
         """Get the required cache size of the state cache.
 
         Args:
-            state_shapes (List[Tuple[Tuple[int], torch.dtype]]): The shapes and dtypes of the states.
+            state_shapes (list[tuple[tuple[int], torch.dtype]]): The shapes and dtypes of the states.
 
         Return:
             int: Required memory size in bytes.

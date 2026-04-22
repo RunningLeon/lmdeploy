@@ -17,7 +17,10 @@ add_library(models STATIC
         llama/unified_attention_layer.cc
         llama/llama_kernels.cu
         llama/llama_utils.cu
-        llama/mla_utils.cu)
+        llama/mla_utils.cu
+        llama/GatedDeltaNetWeight.cc
+        llama/GatedDeltaNetLayer.cc
+        llama/gated_delta_net_kernels.cu)
 set_property(TARGET models PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET models PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 target_link_libraries(models PUBLIC
@@ -37,5 +40,19 @@ target_link_libraries(models PUBLIC
         gpt_kernels
         memory_utils
         cuda_utils
-        logger
         anomaly_handler)
+target_compile_options(models PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v --generate-line-info --threads 8>)
+
+if(BUILD_TEST)
+    add_executable(bench_gated_delta_net
+            llama/bench_gated_delta_net.cc)
+    target_link_libraries(bench_gated_delta_net PRIVATE
+            models
+            CUDA::cudart)
+
+    add_executable(bench_conv1d_silu
+            llama/bench_conv1d_silu.cc)
+    target_link_libraries(bench_conv1d_silu PRIVATE
+            models
+            CUDA::cudart)
+endif()

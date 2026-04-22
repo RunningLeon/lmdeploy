@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from typing import Optional, Union
 
 import torch
 
@@ -15,6 +14,7 @@ from .deepseek_vl2 import DeepSeek2VisionModel  # noqa F401
 from .gemma3_vl import Gemma3VisionModel  # noqa F401
 from .glm4_1v import GLM4_1_VisionModel  # noqa F401
 from .glm4_v import GLM4VisionModel  # noqa F401
+from .interns1_pro import InternS1ProVisionModel  # noqa F401
 from .internvl import InternVLVisionModel  # noqa F401
 from .internvl3_hf import InternVL3VisionModel  # noqa F401
 from .internvl_llava import InternVLLlavaVisionModel  # noqa F401
@@ -29,6 +29,7 @@ from .phi3_vision import Phi3VisionModel  # noqa F401
 from .qwen import QwenVisionModel  # noqa F401
 from .qwen2 import Qwen2VLModel  # noqa F401
 from .qwen3 import Qwen3VLModel  # noqa F401
+from .qwen3_5 import Qwen3_5Model  # noqa F401
 from .xcomposer2 import Xcomposer2VisionModel  # noqa F401
 from .yi import YiVisionModel  # noqa F401
 
@@ -38,7 +39,7 @@ logger = get_logger('lmdeploy')
 def load_vl_model(model_path: str,
                   backend: str,
                   with_llm: bool = False,
-                  backend_config: Optional[Union[TurbomindEngineConfig, PytorchEngineConfig]] = None):
+                  backend_config: TurbomindEngineConfig | PytorchEngineConfig | None = None):
     """Load visual model.
 
     Args:

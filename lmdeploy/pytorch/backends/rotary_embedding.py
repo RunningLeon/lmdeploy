@@ -2,7 +2,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List
 
 import torch
 
@@ -26,13 +25,14 @@ class YarnParameters:
     mscale: int = 1
     mscale_all_dim: int = 0
     attention_factor: int = None
+    truncate: bool = True
 
 
 @dataclass
 class LongRoPEScalingParameters:
     """Long Ropescaling parameters."""
-    short_factor: List[int]
-    long_factor: List[int]
+    short_factor: list[int]
+    long_factor: list[int]
     original_max_position_embeddings: int
     long_mscale: float = None
     short_mscale: float = None

@@ -1,11 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from lmdeploy.messages import EngineOutput
-from lmdeploy.pytorch.disagg.conn.protocol import (DistServeConnectionRequest, DistServeDropConnectionRequest,
-                                                   DistServeInitRequest)
+from lmdeploy.pytorch.disagg.conn.protocol import (
+    DistServeConnectionRequest,
+    DistServeDropConnectionRequest,
+    DistServeInitRequest,
+)
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -97,11 +100,11 @@ class EngineWorkerBase:
         """
         return self.engine.p2p_drop_connect(drop_conn_request)
 
-    def sleep(self, level: int = 1):
+    async def sleep(self, level: int = 1):
         """sleep."""
-        return self.engine.sleep(level)
+        return await self.engine.sleep(level)
 
-    def wakeup(self, tags: Optional[List[str]] = None):
+    def wakeup(self, tags: list[str] | None = None):
         """Wakeup."""
         return self.engine.wakeup(tags)
 
@@ -148,7 +151,9 @@ class EngineOutputGather:
     def pop(self, stream_id, result):
         if not isinstance(result, EngineOutput):
             return result
-        output = self._output.pop(stream_id)
+        output = self._output.pop(stream_id, None)
+        if output is None:
+            return result
         result.token_ids = output.token_ids or []
         result.logprobs = output.logprobs or None
         return result

@@ -3,7 +3,7 @@ import asyncio
 import gc
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -11,8 +11,11 @@ import torch
 from lmdeploy.messages import PytorchEngineConfig, RequestMetrics, ResponseType, SpeculativeConfig
 from lmdeploy.pytorch.disagg.config import EngineRole
 from lmdeploy.pytorch.disagg.conn.engine_conn import EngineP2PConnection
-from lmdeploy.pytorch.disagg.conn.protocol import (DistServeConnectionRequest, DistServeDropConnectionRequest,
-                                                   DistServeInitRequest)
+from lmdeploy.pytorch.disagg.conn.protocol import (
+    DistServeConnectionRequest,
+    DistServeDropConnectionRequest,
+    DistServeInitRequest,
+)
 from lmdeploy.utils import get_logger, get_model
 
 from ..adapter.adapter import AdapterManager
@@ -28,7 +31,9 @@ from .request import Request, RequestManager, RequestType, Response
 
 logger = get_logger('lmdeploy')
 
-SeqList = List[SchedulerSequence]
+SeqList = list[SchedulerSequence]
+_INPUT_REQUEST_TYPES = {RequestType.ADD_SESSION, RequestType.ADD_MESSAGE}
+_SLEEPING_TAGS = {'weights', 'kv_cache'}
 
 
 @dataclass
@@ -37,7 +42,7 @@ class InferOutput:
 
     session_id: int
     resp: Response
-    token_ids: Union[np.ndarray, List[int]]
+    token_ids: np.ndarray | list[int]
     meta: Any = None
     finish: bool = False
     logits: torch.Tensor = None
@@ -45,7 +50,7 @@ class InferOutput:
 
     # send cache blocks back for migration in Disaggregated LLM Serving
     # when Prefill Engine is Done.
-    cache_block_ids: List[int] = None
+    cache_block_ids: list[int] = None
 
     # for logging
     req_metrics: RequestMetrics = None
@@ -54,10 +59,13 @@ class InferOutput:
     routed_experts: torch.Tensor = None
 
 
-def _build_seq_meta(cache_config: CacheConfig, seq_strategy: Any, sampling_strategy: Any):
+def _build_seq_meta(model_config: ModelConfig, cache_config: CacheConfig, seq_strategy: Any, sampling_strategy: Any):
     from lmdeploy.pytorch.messages import SequenceMeta
 
-    seq_meta = SequenceMeta(cache_config.block_size, strategy=seq_strategy, sampling_strategy=sampling_strategy)
+    seq_meta = SequenceMeta(cache_config.block_size,
+                            strategy=seq_strategy,
+                            sampling_strategy=sampling_strategy,
+                            use_mrope=model_config.use_mrope)
     return seq_meta
 
 
@@ -156,7 +164,8 @@ class Engine(EngineBase):
         self.input_processor = self.executor.get_input_processor()
         cache_config = self.executor.cache_config
         self.adapter_manager = self._build_adapter_manager(adapters)
-        self.seq_meta = _build_seq_meta(cache_config,
+        self.seq_meta = _build_seq_meta(model_config=self.model_config,
+                                        cache_config=cache_config,
                                         seq_strategy=self.seq_strategy,
                                         sampling_strategy=self.sampling_strategy)
         self.scheduler = Scheduler(scheduler_config, cache_config, seq_meta=self.seq_meta)
@@ -174,10 +183,15 @@ class Engine(EngineBase):
         self.engine_config.num_gpu_blocks = self.cache_config.num_gpu_blocks
 
         self.req_manager = self._bind_request_manager()
+        # This state tracks only explicit Engine.sleep()/wakeup() calls. Do not
+        # infer sleeping from empty_init: empty_init still builds runtime
+        # resources and has its own weight-update workflow.
+        self._sleeping_tags = set()
 
         # create main thread
         self.req_manager.set_main_loop_func(self.async_loop)
         self._loop_main = None
+        self._engine_loop = None
 
         # for PD Disaggregation
         # For migrating prefill request to decode engine
@@ -229,7 +243,7 @@ class Engine(EngineBase):
             speculative_config=speculative_config,
         )
 
-    def _download_adapters(self, adapters: Dict[str, str], engine_config: PytorchEngineConfig):
+    def _download_adapters(self, adapters: dict[str, str], engine_config: PytorchEngineConfig):
         """Download adapters."""
         download_dir = engine_config.download_dir
         revision = engine_config.revision
@@ -274,7 +288,7 @@ class Engine(EngineBase):
             session_len = min(max_tokens, session_len)
         return session_len
 
-    def _on_add_session(self, reqs: List[Request], **kwargs):
+    def _on_add_session(self, reqs: list[Request], **kwargs):
         """On add session callback."""
         for req in reqs:
             session_id = req.data['session_id']
@@ -286,7 +300,7 @@ class Engine(EngineBase):
             if resp:
                 self._response(req.resp, resp_type)
 
-    def _on_stop_session(self, reqs: List[Request], **kwargs):
+    def _on_stop_session(self, reqs: list[Request], **kwargs):
         """On stop session callback."""
         for req in reqs:
             session_id = req.data['session_id']
@@ -298,13 +312,12 @@ class Engine(EngineBase):
                 for seq in session.sequences.values():
                     _resp: Response = getattr(seq, 'resp', None)
                     if _resp is not None:
-                        _resp.type = ResponseType.CANCEL
-                        self.req_manager.response(_resp)
+                        self.req_manager.reject_request(_resp)
                 resp_type = ResponseType.SUCCESS
             if resp:
                 self._response(req.resp, resp_type)
 
-    def _on_end_session(self, reqs: List[Request], **kwargs):
+    def _on_end_session(self, reqs: list[Request], **kwargs):
         """On end session callback."""
         for req in reqs:
             session_id = req.data['session_id']
@@ -320,7 +333,7 @@ class Engine(EngineBase):
             if resp:
                 self._response(req.resp, resp_type)
 
-    def _on_add_message(self, reqs: List[Request], **kwargs):
+    def _on_add_message(self, reqs: list[Request], **kwargs):
         """On add message callback."""
         valid_reqs = []
         for req in reqs:
@@ -358,7 +371,7 @@ class Engine(EngineBase):
         if len(valid_reqs) > 0:
             self._add_message(valid_reqs)
 
-    def _add_message(self, reqs: List[Request]):
+    def _add_message(self, reqs: list[Request]):
 
         def __update_max_new_tokens(msg):
             """Update max new tokens."""
@@ -435,13 +448,70 @@ class Engine(EngineBase):
         """Update params."""
         self.executor.update_params(request)
 
-    def sleep(self, level: int = 1):
-        """Sleep."""
-        self.executor.sleep(level)
+    def _block_new_inputs(self):
+        """Block new inference work from engine instances."""
+        logger.info('PyTorch engine is blocking new inference requests.')
+        self.req_manager.block_request_types(_INPUT_REQUEST_TYPES)
 
-    def wakeup(self, tags: Optional[List[str]] = None):
+    def _unblock_new_inputs(self):
+        """Allow inference work from engine instances."""
+        logger.info('PyTorch engine is allowing new inference requests.')
+        self.req_manager.unblock_request_types(_INPUT_REQUEST_TYPES)
+
+    def _cancel_and_end_all_sessions(self):
+        """Cancel active responses and remove all scheduler sessions."""
+        num_cancelled = 0
+        session_ids = list(self.scheduler.sessions.keys())
+        for session in list(self.scheduler.sessions.values()):
+            for seq in list(session.sequences.values()):
+                resp: Response = getattr(seq, 'resp', None)
+                if resp is None or resp.is_done:
+                    continue
+                self.req_manager.reject_request(resp, reason='engine sleep')
+                num_cancelled += 1
+
+        # Sleep releases KV cache, so every existing scheduler session becomes
+        # invalid even when the original request asked to preserve cache.
+        for session_id in session_ids:
+            self.end_session(session_id)
+        logger.info('PyTorch engine sleep cleanup cancelled %s active responses and ended %s sessions.',
+                    num_cancelled, len(session_ids))
+
+    async def sleep(self, level: int = 1):
+        """Sleep."""
+        logger.info('PyTorch engine sleep requested: level=%s.', level)
+        # log sleep tags so we can resume at the right condition in wakeup.
+        self._sleeping_tags = _SLEEPING_TAGS.copy()
+        # block ADD_MESSAGE and ADD_SESSION
+        self._block_new_inputs()
+        if self._engine_loop is not None:
+            await self._engine_loop.drain_for_sleep()
+            logger.info('PyTorch engine loop drained for sleep.')
+        # cancel all remain sessions
+        self._cancel_and_end_all_sessions()
+        await self.executor.sleep(level)
+        logger.info('PyTorch engine entered sleep: level=%s, sleeping_tags=%s.', level, sorted(self._sleeping_tags))
+
+    def wakeup(self, tags: list[str] | None = None):
         """Wakeup."""
-        self.executor.wakeup(tags)
+        wakeup_tags = tags
+        logger.info('PyTorch engine wakeup requested: tags=%s, sleeping_tags=%s.',
+                    wakeup_tags, sorted(self._sleeping_tags))
+        self.executor.wakeup(wakeup_tags)
+        if wakeup_tags is None:
+            self._sleeping_tags.clear()
+        else:
+            self._sleeping_tags.difference_update(wakeup_tags)
+        # The engine would resume only when all sleep tags has been cleared.
+        if not self._sleeping_tags:
+            # enable ADD_MESSAGE and ADD_SESSION
+            self._unblock_new_inputs()
+            if self._engine_loop is not None:
+                self._engine_loop.resume_from_sleep()
+            logger.info('PyTorch engine wakeup complete; inference requests are enabled.')
+        else:
+            logger.info('PyTorch engine partial wakeup; blocked tags=%s.',
+                        sorted(self._sleeping_tags))
 
     async def async_loop(self):
         engine_loop = None
@@ -452,6 +522,7 @@ class Engine(EngineBase):
 
             # create engine loop
             engine_loop = build_engine_loop(self)
+            self._engine_loop = engine_loop
             self.migration_event = engine_loop.migration_event
 
             # start engine loop
@@ -469,6 +540,7 @@ class Engine(EngineBase):
             logger.debug('Engine main loop finally cleanup.')
             if engine_loop is not None:
                 engine_loop.stop()
+            self._engine_loop = None
             self._loop_finally()
 
     def close(self):

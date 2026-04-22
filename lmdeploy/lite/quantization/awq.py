@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List
 
 import torch
 
@@ -151,7 +150,7 @@ def get_weight_scale(weight, q_group_size=-1):
 
 @torch.no_grad()
 def smooth_ln_fcs(ln: torch.nn.Module,
-                  fcs: List[torch.nn.Module],
+                  fcs: list[torch.nn.Module],
                   act_scales: torch.Tensor,
                   group_size: int = -1,
                   alpha: float = 0.5) -> torch.Tensor:
@@ -204,7 +203,7 @@ def smooth_ln_fcs(ln: torch.nn.Module,
 
 @torch.no_grad()
 def smooth_fc_fcs(pre_fc: torch.nn.Module,
-                  fcs: List[torch.nn.Module],
+                  fcs: list[torch.nn.Module],
                   act_scales: torch.Tensor,
                   group_size: int = -1,
                   alpha: float = 0.5) -> torch.Tensor:
@@ -236,7 +235,9 @@ def smooth_fc_fcs(pre_fc: torch.nn.Module,
               'clamping w_scales.pow(1 - alpha) to 1e-4')
         w_scales_pow = w_scales_pow.clamp(min=1e-4)
     scales = (act_scales.pow(alpha) / w_scales_pow).clamp(min=1e-4).to(device).to(dtype)
-    scales = scales / (scales.max() * scales.min()).sqrt()
+    # prevent scales.max() * scales.min() == inf
+    denom = (scales.max().float() * scales.min().float()).sqrt()
+    scales = (scales.float() / denom).to(dtype=dtype)
 
     # (for qwen&baichuan) pre_fc is packed QKV, only V needs to scale
     # phi3 fused qkv and gate_up

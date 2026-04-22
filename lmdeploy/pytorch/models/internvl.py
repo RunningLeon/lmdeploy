@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -12,14 +13,14 @@ from lmdeploy.pytorch.distributed import get_tp_world_rank
 from lmdeploy.pytorch.engine.input_process import BaseModelInputProcessor, PreprocessInputResult
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.models.utils.micro_batch import enable_micro_batch, split_batch
-from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
+from lmdeploy.pytorch.multimodal.data_type import MultiModalData
 from lmdeploy.pytorch.nn import LayerNorm, RMSNorm
 from lmdeploy.pytorch.nn.linear import build_colwise_linear, build_o_proj, build_qkv_proj, build_rowwise_linear
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .patch import build_model_from_hf_config
 from .utils.cudagraph import CudaGraphMixin
-from .utils.model import DeployModelMixin, vlm_model
+from .utils.model import DeployModelMixinV1, vlm_model
 
 
 class Gating(nn.Module):
@@ -277,7 +278,7 @@ class InternAttention(nn.Module):
         eps = self.config.layer_norm_eps
         return post_rms_norm(q, k, self.q_norm.weight, self.k_norm.weight, variance, eps, self.embed_dim, dtype)
 
-    def qkv_norm(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def qkv_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         import lmdeploy.pytorch.distributed as dist
         q_shape = q.shape
         k_shape = k.shape
@@ -432,7 +433,7 @@ class InternVisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.FloatTensor] = None,
+        pixel_values: torch.FloatTensor | None = None,
     ):
         """forward."""
         assert pixel_values.dim() == 4
@@ -444,7 +445,7 @@ class InternVisionModel(nn.Module):
         return last_hidden_state
 
 
-class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
+class InternVLChatModel(nn.Module, DeployModelMixinV1, CudaGraphMixin):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -472,7 +473,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
             self.vision_model = InternVisionModel(vision_config, dtype=dtype, device=device)
 
         self.language_model = build_model_from_hf_config(llm_config, dtype=dtype, device=device)
-
+        self.lm_head = self.language_model.lm_head
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.llm_config.hidden_size
         self.downsample_ratio = config.downsample_ratio
@@ -713,7 +714,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
 
         return vit_embeds, new_lang_embeds, new_input_ids, new_image_mask, new_seq_lengths
 
-    def update_forward_inputs(self, input_ids: torch.Tensor, new_seqlens: List[int],
+    def update_forward_inputs(self, input_ids: torch.Tensor, new_seqlens: list[int],
                               context: StepContext) -> StepContext:
         """Update the forward inputs, position_ids and attention metadata."""
         from lmdeploy.pytorch.model_inputs import ModelInputs
@@ -724,6 +725,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
         # update model metas
         prev_lens = [0] * len(context.model_metas)
         has_model_metas = context.model_metas is not None and context.model_metas[0] is not None
+        context.is_model_meta_updated = has_model_metas
         if has_model_metas:
             prev_lens = [meta.get('new_seqlen', 0) for meta in context.model_metas]
 
@@ -746,7 +748,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
                                        max_kv_seqlen=kv_seqlens.max().item(),
                                        sum_kv_seqlen=kv_seqlens.sum().item(),
                                        model_metas=context.model_metas)
-        new_ctx = self.ctx_mgr.build_context(new_model_inputs, crt_ctx.model_config)
+        new_ctx = self.ctx_mgr.build_context(new_model_inputs, crt_ctx.model_config, crt_ctx.cache_config)
 
         # update attributes of the context in model agent
         context.q_seqlens = new_ctx.q_seqlens
@@ -757,7 +759,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        past_key_values: List[List[torch.Tensor]],
+        past_key_values: list[list[torch.Tensor]],
         attn_metadata: Any = None,
         pixel_values: torch.Tensor = None,
         image_mask: torch.Tensor = None,
@@ -801,17 +803,13 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
                                                position_ids=position_ids,
                                                attn_metadata=attn_metadata)
 
-    def get_logits(self, hidden_states: torch.Tensor):
-        """Compute logits of the model output."""
-        return self.language_model.get_logits(hidden_states)
-
     def get_input_embeddings(self):
         """Get input embeddings."""
         return self.language_model.get_input_embeddings()
 
     def prepare_inputs_for_generation(
         self,
-        past_key_values: List[List[torch.Tensor]],
+        past_key_values: list[list[torch.Tensor]],
         inputs_embeds: torch.Tensor = None,
         context: StepContext = None,
     ):
@@ -850,6 +848,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
             inputs_embeds[:, vision_embedding_indexing, :] = vision_embeddings.to(inputs_embeds)
 
         has_model_metas = context.model_metas is not None and context.model_metas[0] is not None
+        context.is_model_meta_updated = has_model_metas
         if context.is_decoding:
             if has_model_metas:
                 # NOTE, zhouxinyu, we need to consider the increasing batch in the decoding stage
@@ -923,7 +922,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
                         image_token_id=image_token_id,
                         context=context)
 
-    def load_lora_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], adapter_id: int):
+    def load_lora_weights(self, weights: Iterable[tuple[str, torch.Tensor]], adapter_id: int):
         """Load lora weights."""
 
         if hasattr(self.language_model, 'load_lora_weights'):
@@ -933,7 +932,7 @@ class InternVLChatModel(nn.Module, DeployModelMixin, CudaGraphMixin):
 
             return load_lora_weights(weights, adapter_id)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights."""
 
         lang_prefix = 'language_model.'
@@ -978,8 +977,8 @@ class InternVLInputProcessor(BaseModelInputProcessor):
         self.vision_token_num = self.num_patches // 4
 
     def preprocess_input(self,
-                         input_ids: List[int],
-                         input_multimodals: List[Dict[str, Any]] = None,
+                         input_ids: list[int],
+                         input_multimodals: list[dict[str, Any]] = None,
                          **kwargs) -> PreprocessInputResult:
         """Prepare multimodal input."""
         if input_multimodals is None or len(input_multimodals) == 0:
@@ -994,10 +993,10 @@ class InternVLInputProcessor(BaseModelInputProcessor):
             if isinstance(num_pad, torch.Tensor):
                 num_pad = num_pad.item()
 
-            mm_data = MultiModalTensor(data=pixel_values,
-                                       start=offset,
-                                       end=offset + num_pad,
-                                       meta=dict(image_token_id=image_token_id))
+            mm_data = MultiModalData(data=pixel_values,
+                                     start=offset,
+                                     end=offset + num_pad,
+                                     meta=dict(image_token_id=image_token_id))
             input_imgs.append(mm_data)
 
         result = PreprocessInputResult(

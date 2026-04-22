@@ -2,7 +2,7 @@
 # Inspired by vLLM: https://github.com/vllm-project/vllm
 import asyncio
 import contextlib
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from lmdeploy.pytorch.config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig, SpecDecodeConfig
 from lmdeploy.pytorch.disagg.conn.protocol import DistServeInitRequest, DistServeKVTransferEndpointInfo
@@ -23,7 +23,7 @@ class ExecutorBase:
                  backend_config: BackendConfig,
                  dist_config: DistConfig,
                  misc_config: MiscConfig,
-                 adapters: Dict[str, str] = None,
+                 adapters: dict[str, str] = None,
                  specdecode_config: SpecDecodeConfig = None,
                  device_type: str = 'cuda'):
         """Initialize Executor."""
@@ -74,11 +74,11 @@ class ExecutorBase:
         """warmup."""
         raise NotImplementedError('Not Implemented.')
 
-    def sleep(self, level: int = 1):
+    async def sleep(self, level: int = 1):
         """Sleep."""
         raise NotImplementedError('Not Implemented.')
 
-    def wakeup(self, tags: Optional[List[str]] = None):
+    def wakeup(self, tags: list[str] | None = None):
         """Wakeup."""
         raise NotImplementedError('Not Implemented.')
 
@@ -120,7 +120,7 @@ class ExecutorBase:
         """Init rdma link."""
         raise NotImplementedError('Not implemented')
 
-    def p2p_connect(self, conn_request: List[DistServeKVTransferEndpointInfo]):
+    def p2p_connect(self, conn_request: list[DistServeKVTransferEndpointInfo]):
         """rdma_connect."""
         raise NotImplementedError('Not Implemented')
 
@@ -154,6 +154,7 @@ class ExecutorBase:
         # TODO: support kernel with both large head dim and large block size.
         if self.model_config.k_head_dim >= 512 and self.cache_config.block_size > 32:
             self.cache_config.block_size = 32
+            self.cache_config.kernel_block_size = 32
             logger.warning(
                 f'Update `block_size={self.cache_config.block_size}` for large `head_dim={self.model_config.k_head_dim}`.'  # noqa
             )
@@ -170,7 +171,7 @@ class ExecutorBase:
         if num_state_caches is None:
             # add more caches for eviction
             # TODO: Share memory between state cache and pageable cache
-            num_state_caches = int(cache_config.max_batches + 8)
+            num_state_caches = int(cache_config.max_batches + 1)
             cache_config.num_state_caches = num_state_caches
 
         mems = StateCacheEngine.get_cache_state_size(cache_config.states_shapes)

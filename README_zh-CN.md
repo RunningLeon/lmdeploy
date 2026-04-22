@@ -24,14 +24,24 @@ ______________________________________________________________________
 ## 最新进展 🎉
 
 <details open>
-<summary><b>2025</b></summary>
+<summary><b>2026</b></summary>
+
+- \[2026/04\] 由于 LMDeploy 在 PyPI 上的项目存储配额已满，新版本目前无法上传预编译安装包（wheels）。用户可以通过 [GitHub Releases](https://github.com/InternLM/lmdeploy/releases) 页面下载安装包，或者通过源码安装等方式使用最新版本；预编译包恢复上传后我们会另行通知。受影响版本：>=0.12.2
+- \[2026/02\] 支持 [Qwen3.5](https://huggingface.co/collections/Qwen/qwen35)
+- \[2026/02\] 支持 [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor) 4bit 对称和非对称量化。 具体操作指南详见[此处](./docs/zh_cn/quantization/llm_compressor.md)
+
 </details>
+
+<details close>
+<summary><b>2025</b></summary>
 
 - 【2025年9月】TurboMind 引擎支持 MXFP4，适用于 NVIDIA V100 及以上 GPU。在 H800 上推理 openai gpt-oss 模型，性能可达 vLLM 的 1.5倍！
 - 【2025年6月】深度优化 FP8 MoE 模型推理
 - 【2025年6月】集成[DLSlime](https://github.com/DeepLink-org/DLSlime)和[Mooncake](https://github.com/kvcache-ai/Mooncake)，实现DeepSeek PD分离部署，向两个团队表示诚挚的感谢！
 - 【2025年4月】集成deepseek-ai组件FlashMLA、DeepGemm、DeepEP、MicroBatch、eplb等，提升DeepSeek推理性能
 - 【2025年1月】新增对DeepSeek V3及R1的支持
+
+</details>
 
 <details close>
 <summary><b>2024</b></summary>
@@ -156,6 +166,8 @@ LMDeploy TurboMind 引擎拥有卓越的推理能力，在各种规模的模型�
   <li>MiniCPM3 (4B)</li>
   <li>SDAR (1.7B-30B)</li>
   <li>gpt-oss (20B, 120B)</li>
+  <li>GLM-4.7-Flash (30B)</li>
+  <li>GLM-5 (754B)</li>
 </ul>
 </td>
 <td>
@@ -167,6 +179,7 @@ LMDeploy TurboMind 引擎拥有卓越的推理能力，在各种规模的模型�
   <li>Qwen2-VL (2B, 7B, 72B)</li>
   <li>Qwen2.5-VL (3B, 7B, 72B)</li>
   <li>Qwen3-VL (2B - 235B)</li>
+  <li>Qwen3.5 (0.8B - 397B)</li>
   <li>DeepSeek-VL (7B)</li>
   <li>DeepSeek-VL2 (3B, 16B, 27B)</li>
   <li>InternVL-Chat (v1.1-v1.5)</li>
@@ -176,6 +189,7 @@ LMDeploy TurboMind 引擎拥有卓越的推理能力，在各种规模的模型�
   <li>InternVL3.5 (1B-241BA28B)</li>
   <li>Intern-S1 (241B)</li>
   <li>Intern-S1-mini (8.3B)</li>
+  <li>Intern-S1-Pro (1TB)</li>
   <li>Mono-InternVL (2B)</li>
   <li>ChemVLM (8B-26B)</li>
   <li>CogVLM-Chat (17B)</li>
@@ -204,25 +218,23 @@ LMDeploy 支持 2 种推理引擎： [TurboMind](./docs/zh_cn/inference/turbomin
 
 ## 安装
 
-我们推荐在一个干净的conda环境下（python3.9 - 3.12），安装 lmdeploy：
+我们推荐在一个干净的conda环境下（python3.10 - 3.13），安装 lmdeploy：
 
 ```shell
-conda create -n lmdeploy python=3.10 -y
+conda create -n lmdeploy python=3.12 -y
 conda activate lmdeploy
 pip install lmdeploy
 ```
 
-自 v0.3.0 版本起，默认预编译包基于 **CUDA 12** 编译。
+自 v0.3.0 版本起，默认预编译包基于 **CUDA 12** 编译。v0.10.2 及更高版本中，LMDeploy 不再支持 CUDA 11+。
 
-若使用 GeForce RTX 50 系列显卡，请安装基于 **CUDA 12.8** 编译的 LMDeploy 预编译包。
+若使用 GeForce RTX 50 系列显卡，请按照如下方式安装基于 **CUDA 12.8** 编译的 LMDeploy 预编译包。
 
 ```shell
-export LMDEPLOY_VERSION=0.11.1
-export PYTHON_VERSION=310
+export LMDEPLOY_VERSION=0.12.3
+export PYTHON_VERSION=312
 pip install https://github.com/InternLM/lmdeploy/releases/download/v${LMDEPLOY_VERSION}/lmdeploy-${LMDEPLOY_VERSION}+cu128-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux2014_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu128
 ```
-
-如果需要在 CUDA 11+ 下安装 LMDeploy，或者源码安装 LMDeploy，请参考[安装文档](docs/zh_cn/get_started/installation.md)
 
 ## 离线批处理
 

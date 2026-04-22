@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Any, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -7,14 +8,29 @@ from torch import nn
 
 from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank
 from lmdeploy.pytorch.model_inputs import StepContextManager
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, RMSNorm, RopeType, build_rotary_embedding,
-                                 build_rotary_params)
+from lmdeploy.pytorch.nn import (
+    ApplyRotaryEmb,
+    Attention,
+    RMSNorm,
+    RopeType,
+    build_rotary_embedding,
+    build_rotary_params,
+)
 from lmdeploy.pytorch.nn.eplb import EPLBManager
 from lmdeploy.pytorch.nn.linear import build_colwise_linear, build_o_proj, build_rowwise_linear
 from lmdeploy.pytorch.nn.nsa import IndexerTopKFP8
+from lmdeploy.pytorch.nn.rotary_embedding import get_rope_parameters, get_rope_theta
 
-from .deepseek_v2 import (DeepseekV2Attention, DeepseekV2BMM, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
-                          DeepseekV2MLP, DeepseekV2Model, DeepseekV2MoE, yarn_get_mscale)
+from .deepseek_v2 import (
+    DeepseekV2Attention,
+    DeepseekV2BMM,
+    DeepseekV2DecoderLayer,
+    DeepseekV2ForCausalLM,
+    DeepseekV2MLP,
+    DeepseekV2Model,
+    DeepseekV2MoE,
+    yarn_get_mscale,
+)
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
@@ -80,7 +96,6 @@ class Indexer(nn.Module):
                                                  device=device,
                                                  is_tp=False)
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = quant_config['scale_fmt']
         self.apply_rotary_pos_emb = ApplyRotaryEmb()
         self.indexer_topk = IndexerTopKFP8(self.index_topk, self.softmax_scale, block_size=128, fill=-1)
 
@@ -88,7 +103,7 @@ class Indexer(nn.Module):
                 x: torch.Tensor,
                 qr: torch.Tensor,
                 freqs_cis: torch.Tensor,
-                index_cache: Tuple[torch.Tensor, torch.Tensor],
+                index_cache: tuple[torch.Tensor, torch.Tensor],
                 attn_metadata: Any = None):
         q = self.wq_b(qr)
         q = q.unflatten(-1, (-1, self.head_dim))
@@ -197,10 +212,11 @@ class DeepseekV32Attention(DeepseekV2Attention):
 
         self.softmax_scale = self.q_head_dim**(-0.5)
 
-        if config.rope_scaling is not None:
-            mscale_all_dim = config.rope_scaling.get('mscale_all_dim', 0)
-            scaling_factor = config.rope_scaling['factor']
+        rope_scaling = get_rope_parameters(config)
+        if rope_scaling is not None:
+            mscale_all_dim = rope_scaling.get('mscale_all_dim', 0)
             if mscale_all_dim:
+                scaling_factor = rope_scaling['factor']
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
 
@@ -269,7 +285,7 @@ class DeepseekV32Attention(DeepseekV2Attention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        rotary_pos_emb: Tuple[torch.FloatTensor, torch.FloatTensor],
+        rotary_pos_emb: tuple[torch.FloatTensor, torch.FloatTensor],
         past_key_value: Sequence[torch.Tensor] = None,
         attn_metadata: Any = None,
     ):
@@ -381,7 +397,7 @@ class DeepseekV32Model(DeepseekV2Model):
         rope_dim = config.qk_rope_head_dim if getattr(config, 'use_mla', True) else (config.hidden_size //
                                                                                      config.num_attention_heads)
         rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
+        rope_base = get_rope_theta(config)
 
         rope_params = dict(emb_type=emb_type, dim=rope_dim, max_position_embeddings=rope_max_pos_emb, base=rope_base)
         update_params = build_rotary_params(config)

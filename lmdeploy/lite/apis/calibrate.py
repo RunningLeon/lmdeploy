@@ -1,12 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
 import torch
 from torch import nn
 from transformers import AutoTokenizer
 
-from lmdeploy.archs import get_task
+from lmdeploy.archs import get_model_arch, get_task
 from lmdeploy.lite.quantization import CalibrationContext, CalibrationContextV2
 from lmdeploy.lite.utils import collect_target_modules, get_calib_loaders, load_hf_from_pretrained
 from lmdeploy.vl.model.builder import load_vl_model
@@ -76,7 +76,7 @@ HEAD_NAME_MAP = {
 
 
 def _prepare_for_calibrate(model: nn.Module,
-                           layer_type: Union[str, type],
+                           layer_type: str | type,
                            head_name: str = 'lm_head',
                            device: str = 'cuda',
                            prefix: str = '') -> None:
@@ -95,7 +95,7 @@ def _prepare_for_calibrate(model: nn.Module,
     ----------
     model : nn.Module
         The PyTorch model to prepare for calibration.
-    layer_type : Union[str, Type]
+    layer_type : str | type
         The type of the layer to be moved to CPU. Can be either a string of
         class name or the class type itself.
     head_name : str, optional
@@ -241,7 +241,7 @@ def calibrate(model: str,
         'Support only `wikitext2`, `c4`, `pileval`, `gsm8k`, ' \
         '`neuralmagic_calibration`, `open-platypus`, `openwebtext`.'
 
-    model_type, _ = get_task(model)
+    model_type, _ = get_task(backend='turbomind', model_path=model)
     make_compatible_internvl_config(model)
 
     # Load tokenizer and configuration
@@ -251,6 +251,7 @@ def calibrate(model: str,
         model = load_hf_from_pretrained(model, dtype=dtype, trust_remote_code=True)
         vl_model = None
     elif model_type == 'vlm':
+        _, original_config = get_model_arch(model)
         vl_model = load_vl_model(model, backend=None, with_llm=True).vl_model
         model = vl_model
         if hasattr(vl_model, 'language_model'):  # deepseek-vl, ...
@@ -258,16 +259,16 @@ def calibrate(model: str,
         if hasattr(vl_model, 'llm'):  # MiniCPMV, ...
             model = vl_model.llm
         model.config.use_cache = False
-        if dtype == 'float16':
+        if hasattr(model.config, 'text_config'):
+            model.config.text_config.use_cache = False
+        elif hasattr(model.config, 'llm_config'):
+            model.config.llm_config.use_cache = False
+        if dtype == 'float16' or (dtype == 'auto' and original_config.torch_dtype == torch.float16):
             model.half()
-        elif dtype == 'bfloat16':
+        elif dtype == 'bfloat16' or (dtype == 'auto' and original_config.torch_dtype == torch.bfloat16):
             assert torch.cuda.is_bf16_supported(
             ), 'your device does not support bfloat16 please set --dtype float16'  # noqa
             model.to(torch.bfloat16)
-        elif dtype == 'auto' and model.config.torch_dtype == torch.bfloat16:
-            print('Warning: we cast model to float16 to prevent OOM. You'
-                  ' may enforce it bfloat16 by `--dtype bfloat16`')
-            model.half()
         model.eval()
 
     model_type = type(model).__name__

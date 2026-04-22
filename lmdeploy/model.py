@@ -2,10 +2,11 @@
 import dataclasses
 import json
 import uuid
-from typing import List, Literal, Optional, Union
+from typing import Literal
 
 from mmengine import Registry
 
+from lmdeploy.archs import get_model_arch
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -17,7 +18,7 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-def get_text(content: Union[str, List[dict]]):
+def get_text(content: str | list[dict]):
     """Within the OpenAI API, the content field may be specified as either a
     string or a list of ChatCompletionContentPartTextParam (defined in openai).
 
@@ -35,34 +36,37 @@ class ChatTemplateConfig:
     """Parameters for chat template.
 
     Args:
-        model_name (str): the name of the deployed model. Determine which chat template will be applied.
-            All the chat template names: `lmdeploy list`
-        system (str | None): begin of the system prompt
-        meta_instruction (str | None): system prompt
-        eosys (str | None): end of the system prompt
-        user (str | None): begin of the user prompt
-        eoh (str | None): end of the user prompt
-        assistant (str | None): begin of the assistant prompt
-        eoa (str | None): end of the assistant prompt
-        tool (str | None): begin of the tool prompt
-        eotool (str | None): end of the tool prompt
-        capability: ('completion' | 'infilling' | 'chat' | 'python') = None
-    """  # noqa: E501
+        model_name: the name of the deployed model. Determine which chat template will be applied.
+            All the chat template names: ``lmdeploy list``
+        system: begin of the system prompt.
+        meta_instruction: system prompt.
+        eosys: end of the system prompt.
+        user: begin of the user prompt.
+        eoh: end of the user prompt.
+        assistant: begin of the assistant prompt.
+        eoa: end of the assistant prompt.
+        tool: begin of the tool prompt.
+        eotool: end of the tool prompt.
+        capability: the capability of the model, one of
+            ``'completion'``, ``'infilling'``, ``'chat'``, ``'python'``.
+            Default to None.
+        stop_words: list of stop words. Default to None.
+    """
 
     model_name: str
-    model_path: Optional[str] = None
-    system: Optional[str] = None
-    meta_instruction: Optional[str] = None
-    eosys: Optional[str] = None
-    user: Optional[str] = None
-    eoh: Optional[str] = None
-    assistant: Optional[str] = None
-    eoa: Optional[str] = None
-    tool: Optional[str] = None
-    eotool: Optional[str] = None
-    separator: Optional[str] = None
-    capability: Optional[Literal['completion', 'infilling', 'chat', 'python']] = None
-    stop_words: Optional[List[str]] = None
+    model_path: str | None = None
+    system: str | None = None
+    meta_instruction: str | None = None
+    eosys: str | None = None
+    user: str | None = None
+    eoh: str | None = None
+    assistant: str | None = None
+    eoa: str | None = None
+    tool: str | None = None
+    eotool: str | None = None
+    separator: str | None = None
+    capability: Literal['completion', 'infilling', 'chat', 'python'] | None = None
+    stop_words: list[str] | None = None
 
     @property
     def chat_template(self):
@@ -90,12 +94,12 @@ class ChatTemplateConfig:
         """Construct a dataclass instance from a JSON file or JSON string."""
         try:
             # Try to open the input_data as a file path
-            with open(file_or_string, 'r', encoding='utf-8') as file:
+            with open(file_or_string, encoding='utf-8') as file:
                 json_data = file.read()
         except FileNotFoundError:
             # If it's not a file path, assume it's a JSON string
             json_data = file_or_string
-        except IOError:
+        except OSError:
             # If it's not a file path and not a valid JSON string, raise error
             raise ValueError('Invalid input. Must be a file path or a valid JSON string.')
         json_data = json.loads(json_data)
@@ -168,7 +172,7 @@ class BaseChatTemplate:
         chat template.
 
         Args:
-            messages (str | List): user's input prompt
+            messages (str | list): user's input prompt
         Returns:
             str: the concatenated prompt
         """
@@ -190,7 +194,7 @@ class BaseChatTemplate:
         return ret
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -224,7 +228,7 @@ class CogVLM(BaseChatTemplate):
                          **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -269,7 +273,7 @@ class Vicuna(BaseChatTemplate):
         return super().messages2prompt(messages, sequence_start, **kwargs)[:-1]
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -293,7 +297,7 @@ class Llavav1(Vicuna):
         super().__init__(meta_instruction=meta_instruction, **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -338,7 +342,7 @@ class InternLMChat7B(BaseChatTemplate):
                          **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -359,7 +363,7 @@ class Baichuan2(BaseChatTemplate):
         super().__init__(user=user, assistant=assistant, **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -397,7 +401,7 @@ If a question does not make any sense, or is not factually coherent, explain why
                          **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -442,7 +446,7 @@ class CodeLlama(Llama2):
         return prompt
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -493,7 +497,7 @@ class ChatGLM2(BaseChatTemplate):
         return ret
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -516,7 +520,7 @@ class MistralChat(BaseChatTemplate):
         super().__init__(user=user, eoh=eoh, eoa=eoa, **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -547,7 +551,7 @@ class InternVLZH(BaseChatTemplate):
         return super().messages2prompt(messages, sequence_start, **kwargs)[:-1]
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -589,7 +593,7 @@ class DeepseekVL(BaseChatTemplate):
         return super().messages2prompt(messages, sequence_start, **kwargs)[:-1]
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -628,7 +632,7 @@ class DeepseekVL2(BaseChatTemplate):
         return super().messages2prompt(messages, sequence_start, **kwargs)[:-1]
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -663,7 +667,7 @@ class ChatmlDirect(BaseChatTemplate):
                          **kwargs)
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         """Return the model_name that was registered to MODELS.
 
         Args:
@@ -682,22 +686,21 @@ class HFChatTemplate(BaseChatTemplate):
     """
 
     def __init__(self, model_path: str = '', **kwargs):
+        self.model_path = model_path
         try:
-            from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+            from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            self.system_start, self.system_end = self._role_instruction('system')
-            self.user_start, self.user_end = self._role_instruction('user')
-            self.assistant_start, self.assistant_end = self._role_instruction('assistant')
+            # Verify if the model can perform apply_chat_template with different roles.
+            self.user_start, self.user_end, _, _ = self._user_instruction()
+            self.assistant_start, self.assistant_end, _, _ = self._assistant_instruction()
+            _, _, self.sentinel_system_messages, self.sentinel_system_prompt = self._system_instruction()
             self.stop_words = []
             if hasattr(self.tokenizer, 'eos_token') and self.tokenizer.eos_token is not None:
                 self.stop_words.append(self.tokenizer.eos_token)
             if hasattr(self.tokenizer, 'eot_token') and self.tokenizer.eot_token is not None:
                 self.stop_words.append(self.tokenizer.eot_token)
-            try:
-                cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            except Exception as e:  # noqa
-                cfg = PretrainedConfig.from_pretrained(model_path, trust_remote_code=True)
-            self.is_gpt_oss = getattr(cfg, 'architectures', [''])[0] == 'GptOssForCausalLM'
+            arch, _ = get_model_arch(model_path)
+            self.is_gpt_oss = arch == 'GptOssForCausalLM'
             if self.is_gpt_oss:
                 self.stop_words.append('<|call|>')
         except Exception as e:
@@ -727,17 +730,14 @@ class HFChatTemplate(BaseChatTemplate):
                                                         **kwargs)
         else:
             # Use a sentinel position to avoid the influence of default system role in the tokenizer's chat template
-            sentinel_messages = [{'role': 'system', 'content': 'This is a sentinel position'}]
-            sentinel_prompt = self.tokenizer.apply_chat_template(sentinel_messages,
-                                                                 tokenize=False,
-                                                                 add_generation_prompt=False)
-            prompt = self.tokenizer.apply_chat_template(sentinel_messages + messages,
+            # in interactive chat mode
+            messages = self.sentinel_system_messages + messages if self.sentinel_system_messages else messages
+            prompt = self.tokenizer.apply_chat_template(messages,
                                                         tokenize=False,
                                                         add_generation_prompt=add_generation_prompt,
                                                         **kwargs)
-            # remove the sentinel part
-            prompt = prompt[len(sentinel_prompt):]
-
+            # Remove the sentinel part.
+            prompt = prompt[len(self.sentinel_system_prompt):] if len(self.sentinel_system_prompt) > 0 else prompt
         if messages[-1]['role'] == 'assistant' and len(self.assistant_end) > 0:
             prompt = prompt[:-len(self.assistant_end)]  # prefix of response to let the model complete the response
         if self.is_gpt_oss and not kwargs.get('tools'):
@@ -745,16 +745,52 @@ class HFChatTemplate(BaseChatTemplate):
             prompt = prompt.replace('commentary, ', '', 1)
         return prompt
 
-    def _role_instruction(self, role):
-        messages = [{'role': role, 'content': 'sentinel'}]
+    def _user_instruction(self):
+        """Extract user message template markers from the tokenizer's chat
+        template."""
+
+        messages = [{'role': 'user', 'content': 'sentinel'}]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
-        role_pos = prompt.find('sentinel')
-        role_start = prompt[:role_pos]
-        role_end = prompt[role_pos + len('sentinel'):]
-        return role_start, role_end
+        user_pos = prompt.find('sentinel')
+        user_start = prompt[:user_pos]
+        user_end = prompt[user_pos + len('sentinel'):]
+        return user_start, user_end, messages, prompt
+
+    def _assistant_instruction(self):
+        """Extract assistant message template markers from the tokenizer's chat
+        template."""
+
+        # Some models, such as google/gemma-2-2b-it, require conversation roles to strictly
+        # alternate between 'user' and 'assistant' (e.g., user/assistant/user/assistant...).
+        # Consequently, we construct test messages containing both user and assistant roles
+        # with special tokens, and parse the assistant tag according to user markers and
+        # special tokens.
+        messages = [{'role': 'user', 'content': 'placeholder'}, {'role': 'assistant', 'content': 'sentinel'}]
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
+        user_end_pos = prompt.find(self.user_end)
+        assistant_pos = prompt.find('sentinel')
+        assistant_start = prompt[user_end_pos + len(self.user_end):assistant_pos]
+        assistant_end = prompt[assistant_pos + len('sentinel'):]
+        return assistant_start, assistant_end, messages, prompt
+
+    def _system_instruction(self):
+        """Extract system message template markers from the tokenizer's chat
+        template."""
+        messages = [{'role': 'system', 'content': 'sentinel'}]
+        try:
+            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            system_pos = prompt.find('sentinel')
+            if system_pos == -1:
+                return None, None, [], self.tokenizer.bos_token or ''
+            system_start = prompt[:system_pos]
+            system_end = prompt[system_pos + len('sentinel'):]
+            return system_start, system_end, messages, prompt
+        except Exception:
+            # Some models, such as google/gemma-2-2b-it, do not support a system role in the message structure.
+            return None, None, [], self.tokenizer.bos_token or ''
 
     @classmethod
-    def match(cls, model_path: str) -> Optional[str]:
+    def match(cls, model_path: str) -> str | None:
         try:
             cls(model_path)
         except Exception:
@@ -762,12 +798,12 @@ class HFChatTemplate(BaseChatTemplate):
         return True
 
 
-def get_chat_template(model_path: str, config: Optional[ChatTemplateConfig] = None) -> BaseChatTemplate:
+def get_chat_template(model_path: str, config: ChatTemplateConfig | None = None) -> BaseChatTemplate:
     """Get the chat template for the model.
 
     Args:
         model_path (str): the model path.
-        config (Optional[ChatTemplateConfig]): the chat template config.
+        config (ChatTemplateConfig | None): the chat template config.
     Returns:
         BaseChatTemplate: the chat template.
     """
