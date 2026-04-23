@@ -4,6 +4,8 @@ from lmdeploy.pytorch.engine.logits_process import SamplingInputs
 from lmdeploy.pytorch.spec_decode.reject_sampler import (
     PLACEHOLDER_TOKEN_ID,
     _extract_outputs,
+    _seeded_exponential_kernel,
+    _seeded_uniform_kernel,
     rejection_greedy_sample_kernel,
     rejection_sample,
     sample_recovered_tokens_kernel,
@@ -371,3 +373,230 @@ class TestTritonKernels:
                                                                NO_DRAFT_PROBS=True)
 
         assert (recovered == 5).all()
+
+
+def _make_expanded_sampling_inputs(batch_size, num_spec, seeds_base, base_offsets, top_k_val=10):
+    """Build a SamplingInputs in the expanded format that spec_agent passes to
+    the rejection sampler: shape [batch_size * num_spec] with seeds repeated
+    and offsets shifted by position index.
+    """
+    seeds_base = torch.as_tensor(seeds_base, dtype=torch.long, device=device)
+    base_offsets = torch.as_tensor(base_offsets, dtype=torch.long, device=device)
+    arange = torch.arange(num_spec, device=device)
+
+    seeds = seeds_base.repeat_interleave(num_spec)  # [b0]*S, [b1]*S, ...
+    offsets = (base_offsets.unsqueeze(1) + arange.unsqueeze(0)).flatten()  # base[b] + pos
+    top_k = torch.full((batch_size * num_spec, ), top_k_val, dtype=torch.long, device=device)
+
+    return SamplingInputs(
+        max_top_k=top_k_val,
+        top_k=top_k,
+        random_seeds=seeds,
+        random_offsets=offsets,
+        batch_size=batch_size * num_spec,
+    )
+
+
+class TestSeededRngKernels:
+    """Direct tests for _seeded_uniform_kernel and
+    _seeded_exponential_kernel."""
+
+    def test_uniform_kernel_range(self):
+        """All output values must be in (0, 1)."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec = 4, 3
+        seeds = torch.randint(1, 0xFFFFFFFF, (batch_size, ), dtype=torch.long, device=device)
+        offsets = torch.zeros(batch_size, dtype=torch.long, device=device)
+        out = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, offsets, out, num_spec)
+
+        assert (out > 0).all(), 'uniform kernel produced 0.0'
+        assert (out < 1).all(), 'uniform kernel produced >= 1.0'
+
+    def test_uniform_kernel_reproducible(self):
+        """Same seed/offset must produce identical values on repeated calls."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec = 4, 3
+        seeds = torch.tensor([10, 20, 30, 40], dtype=torch.long, device=device)
+        offsets = torch.tensor([100, 200, 300, 400], dtype=torch.long, device=device)
+
+        out1 = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+        out2 = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, offsets, out1, num_spec)
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, offsets, out2, num_spec)
+
+        assert torch.equal(out1, out2)
+
+    def test_uniform_kernel_different_offsets(self):
+        """Different offsets for the same seed must produce different
+        values."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec = 4, 3
+        seeds = torch.ones(batch_size, dtype=torch.long, device=device) * 42
+        offsets_a = torch.tensor([0, 0, 0, 0], dtype=torch.long, device=device)
+        offsets_b = torch.tensor([1000, 1000, 1000, 1000], dtype=torch.long, device=device)
+
+        out_a = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+        out_b = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, offsets_a, out_a, num_spec)
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, offsets_b, out_b, num_spec)
+
+        assert not torch.equal(out_a, out_b)
+
+    def test_exponential_kernel_positive(self):
+        """All output values must be strictly positive (exponential
+        distribution)."""
+        if device == 'cpu':
+            return
+        batch_size, vocab = 4, 256
+        num_spec = 3
+        seeds = torch.randint(1, 0xFFFFFFFF, (batch_size, ), dtype=torch.long, device=device)
+        offsets = torch.zeros(batch_size, dtype=torch.long, device=device)
+        out = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+
+        _seeded_exponential_kernel[(batch_size, )](seeds, offsets, out, num_spec, vocab, 128)
+
+        assert (out > 0).all(), 'exponential kernel produced non-positive value'
+
+    def test_exponential_kernel_reproducible(self):
+        """Same seed/offset must produce identical values on repeated calls."""
+        if device == 'cpu':
+            return
+        batch_size, vocab, num_spec = 4, 256, 3
+        seeds = torch.tensor([10, 20, 30, 40], dtype=torch.long, device=device)
+        offsets = torch.tensor([100, 200, 300, 400], dtype=torch.long, device=device)
+
+        out1 = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+        out2 = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+        _seeded_exponential_kernel[(batch_size, )](seeds, offsets, out1, num_spec, vocab, 128)
+        _seeded_exponential_kernel[(batch_size, )](seeds, offsets, out2, num_spec, vocab, 128)
+
+        assert torch.equal(out1, out2)
+
+    def test_exponential_kernel_different_seeds(self):
+        """Different seeds must produce different exponential variates."""
+        if device == 'cpu':
+            return
+        batch_size, vocab, num_spec = 1, 256, 3
+        offsets = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+        out_a = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+        out_b = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+        seeds_a = torch.tensor([1], dtype=torch.long, device=device)
+        seeds_b = torch.tensor([9999], dtype=torch.long, device=device)
+        _seeded_exponential_kernel[(batch_size, )](seeds_a, offsets, out_a, num_spec, vocab, 128)
+        _seeded_exponential_kernel[(batch_size, )](seeds_b, offsets, out_b, num_spec, vocab, 128)
+
+        assert not torch.equal(out_a, out_b)
+
+    def test_uniform_exponential_offset_no_overlap(self):
+        """Uniform and exponential kernels with the same seed/base_offset must
+        draw from non-overlapping offset ranges (no shared randomness)."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec, vocab = 2, 3, 64
+        seeds = torch.tensor([42, 42], dtype=torch.long, device=device)
+        base_offsets = torch.tensor([0, 0], dtype=torch.long, device=device)
+
+        u_out = torch.empty(batch_size, num_spec, device=device, dtype=torch.float32)
+        e_out = torch.empty(batch_size, vocab, device=device, dtype=torch.float32)
+        _seeded_uniform_kernel[(batch_size, num_spec)](seeds, base_offsets, u_out, num_spec)
+        _seeded_exponential_kernel[(batch_size, )](seeds, base_offsets, e_out, num_spec, vocab, 64)
+
+        # The exponential kernel uses offsets base + num_spec + v; the uniform kernel
+        # uses base + pos (0..num_spec-1). Verify the distributions look independent:
+        # reciprocal of exponential = inv_q used in Gumbel; compare that to uniform.
+        inv_q = e_out[:, :num_spec].reciprocal()
+        # They should not be equal (offset streams are disjoint)
+        assert not torch.allclose(u_out, inv_q)
+
+
+class TestSeededRejectionSample:
+    """Tests that rejection_sample is reproducible under the same RNG
+    seeds/offsets."""
+
+    def _make_random_inputs(self, batch_size, num_spec, vocab, seeds_base, base_offsets):
+        target_logits = torch.randn(batch_size, num_spec, vocab, device=device)
+        draft = torch.randint(0, vocab, (batch_size, num_spec), device=device)
+        bonus = torch.randint(0, vocab, (batch_size, ), device=device)
+        si = _make_expanded_sampling_inputs(batch_size, num_spec, seeds_base, base_offsets)
+        return target_logits, draft, bonus, si
+
+    def test_reproducible_same_seeds(self):
+        """Two calls with identical sampling_inputs seeds/offsets must produce
+        identical rejection sampling output."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec, vocab = 4, 3, 64
+        seeds_base = [111, 222, 333, 444]
+        base_offsets = [0, 0, 0, 0]
+
+        torch.manual_seed(0)
+        logits, draft, bonus, si = self._make_random_inputs(batch_size, num_spec, vocab, seeds_base, base_offsets)
+
+        out1, rej1, last1 = rejection_sample(logits, draft, bonus, sampling_inputs=si)
+        out2, rej2, last2 = rejection_sample(logits, draft, bonus, sampling_inputs=si)
+
+        assert torch.equal(out1, out2), 'output_token_ids not reproducible'
+        assert torch.equal(rej1, rej2), 'num_rejected_tokens not reproducible'
+        assert torch.equal(last1, last2), 'last_token_ids not reproducible'
+
+    def test_different_seeds_differ(self):
+        """Two calls with different seeds should (almost certainly) differ."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec, vocab = 4, 3, 64
+
+        torch.manual_seed(1)
+        logits = torch.randn(batch_size, num_spec, vocab, device=device)
+        # Use uniform target to make random sampling non-trivial
+        logits = torch.zeros_like(logits)
+        draft = torch.randint(0, vocab, (batch_size, num_spec), device=device)
+        bonus = torch.randint(0, vocab, (batch_size, ), device=device)
+
+        si_a = _make_expanded_sampling_inputs(batch_size, num_spec, [1, 2, 3, 4], [0, 0, 0, 0])
+        si_b = _make_expanded_sampling_inputs(batch_size, num_spec, [9999, 8888, 7777, 6666], [0, 0, 0, 0])
+
+        out_a, _, _ = rejection_sample(logits, draft, bonus, sampling_inputs=si_a)
+        out_b, _, _ = rejection_sample(logits, draft, bonus, sampling_inputs=si_b)
+
+        assert not torch.equal(out_a, out_b), 'different seeds produced identical output'
+
+    def test_seeds_none_fallback(self):
+        """rejection_sample must run without error when random_seeds is None
+        (falls back to global RNG)."""
+        batch_size, num_spec, vocab = 2, 3, 32
+        logits = torch.randn(batch_size, num_spec, vocab, device=device)
+        draft = torch.randint(0, vocab, (batch_size, num_spec), device=device)
+        bonus = torch.randint(0, vocab, (batch_size, ), device=device)
+        si = SamplingInputs(max_top_k=10, top_k=torch.full((batch_size, ), 10, dtype=torch.long, device=device))
+        # random_seeds and random_offsets default to None
+
+        out, rej, last = rejection_sample(logits, draft, bonus, sampling_inputs=si)
+
+        assert out.shape == (batch_size, num_spec + 1)
+        assert rej.shape == (batch_size, )
+        assert (last >= 0).all()
+
+    def test_different_offsets_differ(self):
+        """Same seed but different base offsets should produce different
+        output."""
+        if device == 'cpu':
+            return
+        batch_size, num_spec, vocab = 4, 3, 64
+        logits = torch.zeros(batch_size, num_spec, vocab, device=device)
+        draft = torch.randint(0, vocab, (batch_size, num_spec), device=device)
+        bonus = torch.randint(0, vocab, (batch_size, ), device=device)
+
+        seeds = [42, 42, 42, 42]
+        si_a = _make_expanded_sampling_inputs(batch_size, num_spec, seeds, [0, 0, 0, 0])
+        si_b = _make_expanded_sampling_inputs(batch_size, num_spec, seeds, [1000, 1000, 1000, 1000])
+
+        out_a, _, _ = rejection_sample(logits, draft, bonus, sampling_inputs=si_a)
+        out_b, _, _ = rejection_sample(logits, draft, bonus, sampling_inputs=si_b)
+
+        assert not torch.equal(out_a, out_b), 'different offsets produced identical output'

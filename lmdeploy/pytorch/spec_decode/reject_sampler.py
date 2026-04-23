@@ -10,6 +10,51 @@ from lmdeploy.pytorch.engine.logits_process import SamplingInputs
 PLACEHOLDER_TOKEN_ID = -1
 
 
+@triton.jit(do_not_specialize=['num_spec_tokens'])
+def _seeded_uniform_kernel(
+    Seeds,  # [batch_size]
+    Offsets,  # [batch_size]
+    Output,  # [batch_size, num_spec_tokens]
+    num_spec_tokens,
+):
+    """Generate seeded uniform random values.
+
+    Grid: (batch_size, num_spec_tokens)
+    Each cell (req, pos) draws tl.rand(seed[req], base_offset[req] + pos).
+    """
+    req_idx = tl.program_id(0)
+    pos = tl.program_id(1)
+    seed = tl.load(Seeds + req_idx)
+    offset = tl.load(Offsets + req_idx).to(tl.int32) + pos
+    u = tl.rand(seed, offset)
+    tl.store(Output + req_idx * num_spec_tokens + pos, u.to(tl.float32))
+
+
+@triton.jit(do_not_specialize=['num_spec_tokens', 'vocab_size'])
+def _seeded_exponential_kernel(
+    Seeds,  # [batch_size]
+    Offsets,  # [batch_size]
+    Output,  # [batch_size, vocab_size]
+    num_spec_tokens,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Generate seeded exponential random values via inverse CDF (-log(u)).
+
+    Grid: (batch_size,)
+    Offset range for vocab index v: base_offset[req] + num_spec_tokens + v,
+    which is disjoint from the uniform kernel's range [base_offset, base_offset + num_spec_tokens).
+    """
+    req_idx = tl.program_id(0)
+    seed = tl.load(Seeds + req_idx)
+    base_offset = tl.load(Offsets + req_idx).to(tl.int32)
+    for start in tl.range(0, vocab_size, BLOCK_SIZE):
+        v_off = start + tl.arange(0, BLOCK_SIZE)
+        mask = v_off < vocab_size
+        u = tl.rand(seed, base_offset + num_spec_tokens + v_off)
+        tl.store(Output + req_idx * vocab_size + v_off, -tl.log(u), mask=mask)
+
+
 class RejectionSampler(nn.Module):
     """Rejection sampler for speculative decoding.
 
@@ -178,20 +223,54 @@ def rejection_sample(
     # 2. Compute target probs from processed logits
     target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
-    # 3. Uniform random [batch, num_spec] (float64 to avoid exact 0.0)
-    uniform_probs = torch.rand(
-        (batch_size, num_spec_tokens),
-        dtype=torch.float64,
-        device=device,
-    )
+    # Extract per-sequence seeds/offsets from sampling_inputs.
+    # sampling_inputs may be expanded to [batch * num_spec_tokens]; stride by num_spec_tokens
+    # to get the per-sequence base seed and offset (position 0 of each sequence).
+    seeds = sampling_inputs.random_seeds if sampling_inputs is not None else None
+    offsets = sampling_inputs.random_offsets if sampling_inputs is not None else None
+    if seeds is not None and offsets is not None:
+        if seeds.numel() == batch_size * num_spec_tokens:
+            seeds_per_seq = seeds[::num_spec_tokens].contiguous()
+            offsets_per_seq = offsets[::num_spec_tokens].contiguous()
+        else:
+            seeds_per_seq = seeds.contiguous()
+            offsets_per_seq = offsets.contiguous()
+    else:
+        seeds_per_seq = offsets_per_seq = None
+
+    # 3. Uniform random [batch, num_spec]
+    if seeds_per_seq is not None:
+        uniform_probs = torch.empty(
+            (batch_size, num_spec_tokens),
+            dtype=torch.float32,
+            device=device,
+        )
+        _seeded_uniform_kernel[(batch_size, num_spec_tokens)](
+            seeds_per_seq, offsets_per_seq, uniform_probs, num_spec_tokens)
+    else:
+        uniform_probs = torch.rand(
+            (batch_size, num_spec_tokens),
+            dtype=torch.float32,
+            device=device,
+        )
 
     # 4. Recovered tokens via Gumbel-max trick
-    q = torch.empty(
-        (batch_size, vocab_size),
-        dtype=torch.float32,
-        device=device,
-    )
-    q.exponential_()
+    BLOCK_SIZE = 8192
+    if seeds_per_seq is not None:
+        q = torch.empty(
+            (batch_size, vocab_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        _seeded_exponential_kernel[(batch_size,)](
+            seeds_per_seq, offsets_per_seq, q, num_spec_tokens, vocab_size, BLOCK_SIZE)
+    else:
+        q = torch.empty(
+            (batch_size, vocab_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        q.exponential_()
     inv_q = q.reciprocal()
 
     recovered_token_ids = torch.empty(
@@ -199,7 +278,6 @@ def rejection_sample(
         dtype=torch.long,
         device=device,
     )
-    BLOCK_SIZE = 8192
     sample_recovered_tokens_kernel[(batch_size, num_spec_tokens)](
         recovered_token_ids,
         draft_token_ids,
