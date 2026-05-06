@@ -10,12 +10,79 @@ from transformers.configuration_utils import PretrainedConfig
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.nn import RMSNorm
 from lmdeploy.pytorch.nn.linear import build_colwise_linear
+from lmdeploy.pytorch.nn.moe import build_fused_moe
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .patch import add_prefix, get_build_model_context
 from .qwen3_5 import Qwen3_5Attention, Qwen3_5DecoderLayer, Qwen3_5MLP, Qwen3_5TextRotaryEmbedding
-from .qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
+from .qwen3_5_moe import Qwen3_5MoeTopKRouter
 from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin
+
+
+class Qwen3_5MoeSparseMoeBlock(nn.Module):
+    """Sparse MoE block."""
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 layer_idx: int,
+                 dtype: torch.dtype | None = None,
+                 device: torch.device | None = None,
+                 prefix: str = ''):
+        super().__init__()
+        quantization_config = getattr(config, 'quantization_config', None)
+        self.layer_idx = layer_idx
+        self.hidden_dim = config.hidden_size
+        self.ffn_dim = config.moe_intermediate_size
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_tok
+
+        self.gate = Qwen3_5MoeTopKRouter(config, dtype=dtype, device=device)
+
+        self.experts = build_fused_moe(
+            self.hidden_dim,
+            self.ffn_dim,
+            self.num_experts,
+            top_k=self.top_k,
+            renormalize=False,
+            dtype=dtype,
+            device=device,
+            quant_config=quantization_config,
+            all_reduce=False,
+            layer_idx=layer_idx,
+            prefix=add_prefix('experts', prefix),
+        )
+
+        self.shared_expert = Qwen3_5MLP(
+            config=config,
+            intermediate_size=config.shared_expert_intermediate_size,
+            dtype=dtype,
+            device=device,
+            is_tp=False,
+            all_reduce=False,
+            prefix=add_prefix('shared_expert', prefix),
+        )
+        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False, device=device, dtype=dtype)
+
+    def forward(self, hidden_states: torch.Tensor, all_routed_experts: torch.Tensor | None = None):
+        """forward."""
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.reshape(-1, hidden_dim)
+        router_logits, topk_weights, topk_ids = self.gate(hidden_states)
+        if all_routed_experts is not None:
+            all_routed_experts[:, self.layer_idx, :] = topk_ids
+        out_states = self.experts(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+        )
+
+        shared_states = self.shared_expert(hidden_states)
+        shared_states = self.shared_expert_gate(hidden_states).sigmoid() * shared_states
+
+        out_states += shared_states
+        out_states = out_states.reshape(batch_size, sequence_length, -1)
+
+        return out_states
 
 
 class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
@@ -47,10 +114,8 @@ class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
                                                 layer_idx,
                                                 dtype=dtype,
                                                 device=device,
-                                                is_tp=False,
                                                 prefix=add_prefix('mlp', prefix=prefix),
                                                 )
-            self.mlp._all_reduce = False
         else:
             self.mlp = Qwen3_5MLP(config,
                                   dtype=dtype,
@@ -146,7 +211,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         layer_idx = self.mtp_start_layer_idx + current_step_idx
         past_key_value = past_key_values[current_step_idx]
 
-        # TODO: fix input mrope position ids
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
