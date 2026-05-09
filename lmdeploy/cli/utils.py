@@ -108,6 +108,7 @@ def get_speculative_config(args):
             method=args.speculative_algorithm,
             model=args.speculative_draft_model,
             num_speculative_tokens=args.speculative_num_draft_tokens,
+            tp=args.speculative_tp,
         )
     return speculative_config
 
@@ -758,6 +759,12 @@ class ArgumentHelper:
                                 type=int,
                                 default=1,
                                 help='The number of speculative tokens to generate per step')
+
+        spec_group.add_argument('--speculative-tp',
+                                type=int,
+                                default=1,
+                                help='Tensor parallelism of speculative draft model. '
+                                'Only 1 or the main model tp is supported')
 
         return spec_group
 

@@ -44,7 +44,9 @@ class ARSpecExtraInputs(ExtraInputs):
                 f'output_token_ids={self.output_token_ids})')
 
     def broadcast(self, src: int, group, async_op=False):
-        dist.broadcast(self.output_draft_token_ids, src=src, group=group, async_op=async_op)
+        dist.broadcast(self.last_token_indices, src=src, group=group, async_op=async_op)
+        dist.broadcast(self.output_token_ids, src=src, group=group, async_op=async_op)
+        dist.broadcast(self.next_token_ids, src=src, group=group, async_op=async_op)
         handle = dist.broadcast(self.num_rejected_tokens, src=src, group=group, async_op=async_op)
         return handle
 
@@ -198,8 +200,12 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
         with torch.inference_mode():
             batch_size = inputs.seq_length.size(0)
             next_token_ids = inputs.input_ids.new_zeros(batch_size)
+            output_len = self.num_spec_tokens + 1 if inputs.is_decoding else 1
+            extra_inputs.next_token_ids = next_token_ids
+            extra_inputs.last_token_indices = inputs.seq_length.new_zeros(batch_size)
             extra_inputs.output_draft_token_ids = inputs.input_ids.new_zeros((batch_size, self.num_spec_tokens))
             extra_inputs.num_rejected_tokens = inputs.input_ids.new_zeros(batch_size)
+            extra_inputs.output_token_ids = inputs.input_ids.new_zeros((batch_size, output_len))
         return next_token_ids, extra_inputs
 
     @contextmanager
@@ -211,4 +217,11 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
         dist.broadcast(next_token_ids, src=rank, group=tp_gpu_group, async_op=True)
         handle = extra_inputs.broadcast(src=rank, group=tp_gpu_group, async_op=True)
         yield
+        handle.wait()
+
+    def broadcast_output_draft_token_ids(self, extra_inputs: ARSpecExtraInputs, dist_ctx: DistContext):
+        """Broadcast draft token ids after draft forward."""
+        tp_gpu_group = dist_ctx.attn_tp_group.gpu_group
+        rank = dist.get_global_rank(tp_gpu_group, 0)
+        handle = dist.broadcast(extra_inputs.output_draft_token_ids, src=rank, group=tp_gpu_group, async_op=True)
         handle.wait()

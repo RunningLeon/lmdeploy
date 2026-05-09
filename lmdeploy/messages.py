@@ -686,7 +686,13 @@ class SpeculativeConfig:
         method: the speculative decoding method.
         model: the path of speculative model.
         num_speculative_tokens: number of generated token of draft model per step
+        tp: tensor parallelism of draft model. Only 1 or the main model tp is supported.
     """
     method: str
     model: str = ''
     num_speculative_tokens: int = 1
+    tp: int = 1
+
+    def __post_init__(self):
+        """Check input validation."""
+        assert self.tp >= 1, f'invalid speculative tp={self.tp}'

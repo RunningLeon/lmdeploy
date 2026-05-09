@@ -610,12 +610,8 @@ class BaseModelAgent:
         logger.debug(f'<ForwardTask> rank[{rank}]: Sampling.')
         # sampling + spec decoding
         if self.spec_agent.is_enabled():
-            # spec_agent handles sampling + logprobs + rejection sampling internally
-            extra_inputs = await self.spec_agent.async_model_forward(inputs, extra_inputs, sampling_inputs)
+            extra_inputs = await self.spec_agent.async_sampling_logits(inputs, extra_inputs, sampling_inputs)
             next_token_ids = extra_inputs.next_token_ids
-            output_token_ids = extra_inputs.output_token_ids
-            logprobs = extra_inputs.logprobs
-            logits = None
         else:
             # normal (non-spec-decode) path: sample from main model logits
             next_token_ids, logprobs = await self.async_sampling_logits(last_logits, sampling_inputs)
@@ -626,17 +622,26 @@ class BaseModelAgent:
         with self._broadcast_next_token(next_token_ids, extra_inputs, enable=need_broadcast_next):
             logger.debug(f'<ForwardTask> rank[{rank}]: synchronize token ids')
 
-            # stopping criteria
-            stopped, stop_pos, stopping_criteria = stopping_criteria.step(
-                next_token_ids,
-                sampling_inputs.stop_words,
-                inputs=inputs,
-                extra_inputs=extra_inputs,
-            )
+        if self.spec_agent.is_enabled():
+            extra_inputs = await self.spec_agent.async_model_forward(inputs, extra_inputs, sampling_inputs)
+            if need_broadcast_next:
+                self.agent_strategy.broadcast_output_draft_token_ids(extra_inputs, self.dist_ctx)
+            next_token_ids = extra_inputs.next_token_ids
+            output_token_ids = extra_inputs.output_token_ids
+            logprobs = extra_inputs.logprobs
+            logits = None
 
-            # send output
-            logger.debug(f'<ForwardTask> rank[{rank}]: Output')
-            extra_outputs = self.agent_strategy.make_extra_outputs(extra_inputs)
+        # stopping criteria
+        stopped, stop_pos, stopping_criteria = stopping_criteria.step(
+            next_token_ids,
+            sampling_inputs.stop_words,
+            inputs=inputs,
+            extra_inputs=extra_inputs,
+        )
+
+        # send output
+        logger.debug(f'<ForwardTask> rank[{rank}]: Output')
+        extra_outputs = self.agent_strategy.make_extra_outputs(extra_inputs)
 
         self._push_output(
             BatchedOutputs(next_token_ids=output_token_ids,
@@ -655,6 +660,7 @@ class BaseModelAgent:
         inputs: ModelInputs,
         last_logits: torch.Tensor,
         extra_inputs: ExtraInputs,
+        sampling_inputs: SamplingInputs,
         need_broadcast_next: bool,
     ):
         rank = self.rank
@@ -665,6 +671,12 @@ class BaseModelAgent:
         # broadcast next token for TP > 1
         with self._broadcast_next_token(next_token_ids, extra_inputs, enable=need_broadcast_next):
             logger.debug(f'<ForwardTask> rank[{rank}]: synchronize token ids')
+
+        if self.spec_agent.is_enabled():
+            extra_inputs = await self.spec_agent.async_model_forward(inputs, extra_inputs, sampling_inputs)
+            if need_broadcast_next:
+                self.agent_strategy.broadcast_output_draft_token_ids(extra_inputs, self.dist_ctx)
+            next_token_ids = extra_inputs.next_token_ids
 
         extra_outputs = self.agent_strategy.make_extra_outputs(extra_inputs)
 
@@ -793,6 +805,7 @@ class BaseModelAgent:
                     inputs,
                     last_logits,
                     extra_inputs,
+                    sampling_inputs,
                     need_broadcast_next,
                 ))
 

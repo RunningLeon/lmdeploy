@@ -557,6 +557,7 @@ class SpecDecodeConfig:
     cache_config: CacheConfig = None
     num_speculative_tokens: int = 1
     model_config: ModelConfig = None
+    dist_config: DistConfig = field(default_factory=DistConfig)
 
     @classmethod
     def from_config(
@@ -569,11 +570,14 @@ class SpecDecodeConfig:
         dtype: str = 'auto',
         trust_remote_code: bool = False,
         model_format: str = None,
+        dist_config: DistConfig = None,
     ):
         model = model or target_model
+        dist_config = dist_config or DistConfig()
         model_config = ModelConfig.from_pretrained(model,
                                                    trust_remote_code=trust_remote_code,
                                                    dtype=dtype,
+                                                   dist_config=dist_config,
                                                    is_draft_model=True,
                                                    spec_method=method,
                                                    block_size=target_cache_cfg.block_size,
@@ -598,6 +602,7 @@ class SpecDecodeConfig:
             method=method,
             cache_config=cache_config,
             model_config=model_config,
+            dist_config=dist_config,
             num_speculative_tokens=num_speculative_tokens,
         )
         return obj

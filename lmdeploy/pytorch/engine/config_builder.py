@@ -98,11 +98,21 @@ class ConfigBuilder:
         return misc_config
 
     @staticmethod
-    def build_specdecode_config(target_model, speculative_config: SpeculativeConfig, engine_config: PytorchEngineConfig,
-                                cache_config: CacheConfig, trust_remote_code: bool = False):
+    def build_specdecode_config(target_model,
+                                speculative_config: SpeculativeConfig,
+                                engine_config: PytorchEngineConfig,
+                                cache_config: CacheConfig,
+                                trust_remote_code: bool = False,
+                                dist_config: DistConfig = None):
         """Build spec decode config."""
         specdecode_config = None
         if speculative_config is not None:
+            dist_config = dist_config or DistConfig.from_engine_config(engine_config)
+            main_tp = dist_config.attn_tp
+            draft_tp = speculative_config.tp
+            if draft_tp not in (1, main_tp):
+                raise ValueError(f'speculative tp must be 1 or main model tp ({main_tp}), but got {draft_tp}.')
+            draft_dist_config = DistConfig() if draft_tp == 1 else copy.deepcopy(dist_config)
             draft_model = speculative_config.model
             if draft_model and not os.path.exists(speculative_config.model):
                 draft_model = get_model(draft_model, engine_config.download_dir, engine_config.revision)
@@ -116,5 +126,6 @@ class ConfigBuilder:
                 dtype=engine_config.dtype,
                 trust_remote_code=trust_remote_code,
                 model_format=engine_config.model_format,
+                dist_config=draft_dist_config,
             )
         return specdecode_config

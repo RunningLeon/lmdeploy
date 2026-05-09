@@ -8,7 +8,7 @@ from torch.profiler import record_function
 from lmdeploy.utils import get_logger
 
 from ..backends import get_backend
-from ..config import BackendConfig, CacheConfig, DistConfig, MiscConfig, ModelConfig, SpecDecodeConfig
+from ..config import BackendConfig, CacheConfig, MiscConfig, ModelConfig, SpecDecodeConfig
 from ..distributed import DistContext, get_dist_manager
 from ..engine.cache_engine import CacheEngine
 from ..engine.logits_process import FusedLogitsProcessor, SamplingInputs, _torch_topk
@@ -100,6 +100,16 @@ def _slice_sampling_inputs(sampling_inputs: SamplingInputs, num_tokens: int, is_
     return SamplingInputs(**out_dict)
 
 
+def _build_draft_dist_ctx(dist_ctx: DistContext, specdecode_config: SpecDecodeConfig) -> DistContext:
+    """Build draft dist context."""
+    draft_dist_config = specdecode_config.dist_config
+    if (draft_dist_config.world_size == dist_ctx.dist_config.world_size
+            and draft_dist_config.attn_tp == dist_ctx.dist_config.attn_tp):
+        return dist_ctx
+    draft_rank = dist_ctx.rank if draft_dist_config.world_size > 1 else 0
+    return DistContext.build(rank=draft_rank, dist_config=draft_dist_config)
+
+
 class SpecModelAgent(BaseSpecModelAgent):
     """Speculative model agent."""
 
@@ -127,7 +137,7 @@ class SpecModelAgent(BaseSpecModelAgent):
         self.method = specdecode_config.method
         self.model_config = specdecode_config.model_config
         self.cache_config = specdecode_config.cache_config
-        self.draft_dist_ctx = DistContext.build(rank=dist_ctx.rank, dist_config=DistConfig())
+        self.draft_dist_ctx = _build_draft_dist_ctx(dist_ctx, specdecode_config)
 
         # make dummy meta
         self.make_dummy_meta = self.inputs_strategy.create_make_dummy_meta(self.model_config)
@@ -171,11 +181,12 @@ class SpecModelAgent(BaseSpecModelAgent):
         """Build cache engine."""
         if self.cache_config is not None:
             with self.draft_context():
+                draft_tp = self.draft_dist_ctx.dist_config.attn_tp
                 self.cache_engine = CacheEngine(self.cache_config,
                                                 self.model_config,
-                                                rank=0,
-                                                tp_rank=0,
-                                                world_size=1,
+                                                rank=0 if draft_tp == 1 else self.dist_ctx.rank,
+                                                tp_rank=self.draft_dist_ctx.attn_tp_group.rank,
+                                                world_size=draft_tp,
                                                 cache_stream=cache_stream)
 
     def _prepare_inputs_from_main(self, model_inputs: ModelInputs, extra_inputs: ExtraInputs):
@@ -402,6 +413,12 @@ class SpecModelAgent(BaseSpecModelAgent):
             output = self.proposer._forward(inputs, cache_engine=self.cache_engine)
         return output
 
+    async def async_sampling_logits(self, model_inputs: 'ModelInputs', extra_inputs: ARSpecExtraInputs,
+                                    sampling_inputs: SamplingInputs):
+        """Sample target logits and run rejection sampling."""
+        with record_function('spec_rejection_sampling'):
+            return await self._rejection_sampling(model_inputs, extra_inputs, sampling_inputs)
+
     async def _async_model_forward(self, inputs: ModelInputs, extra_inputs: ARSpecExtraInputs,
                                    sampling_inputs: SamplingInputs):
         """Model forward.
@@ -455,9 +472,7 @@ class SpecModelAgent(BaseSpecModelAgent):
         sampling_inputs: SamplingInputs,
     ):
         """Draft model forward."""
-        with record_function('spec_rejection_sampling'):
-            draft_extra_inputs = await self._rejection_sampling(model_inputs, extra_inputs, sampling_inputs)
-        draft_model_inputs, draft_extra_inputs = self._prepare_inputs_from_main(model_inputs, draft_extra_inputs)
+        draft_model_inputs, draft_extra_inputs = self._prepare_inputs_from_main(model_inputs, extra_inputs)
         return await self._async_model_forward(draft_model_inputs, draft_extra_inputs, sampling_inputs)
 
     def warmup(self, max_batches: int, target_model_config: ModelConfig):
