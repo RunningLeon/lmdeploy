@@ -473,11 +473,11 @@ class SpecModelAgent(BaseSpecModelAgent):
                                                  target_dtype=self.model_config.dtype,
                                                  meta=self.make_dummy_meta)
 
-        capture_batch_sizes = self.proposer.model.get_capture_batch_sizes()
-        capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
-
         # warmup prefill
         self._forward_impl(inputs)
+
+        capture_batch_sizes = self.proposer.model.get_capture_batch_sizes()
+        capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
 
         # warmup decode
         for batch_size in capture_batch_sizes:
