@@ -326,7 +326,8 @@ class RequestManager:
             logger.debug(f'Reject {req_type.name} request from sender {resp.sender_id}: {reason}')
         elif reason:
             logger.debug(f'Reject response from sender {resp.sender_id}: {reason}')
-        resp.type = ResponseType.CANCEL
+        if resp.type != ResponseType.FINISH:
+            resp.type = ResponseType.CANCEL
         resp.is_done = True
         self.response(resp)
 
