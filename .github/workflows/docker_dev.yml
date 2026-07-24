@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: 'prod'
     env:
-      TAG: "openmmlab/lmdeploy:dev-cu12.8"
+      TAG: "openmmlab/lmdeploy:dev-ubuntu24.04-cu12.8"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

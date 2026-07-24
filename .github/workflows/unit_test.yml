@@ -39,7 +39,7 @@ jobs:
     runs-on: [self-hosted, linux-a100-s2]
     timeout-minutes: 4320 # 72hours
     container:
-      image: openmmlab/lmdeploy:dev-cu12.8
+      image: openmmlab/lmdeploy:dev-ubuntu24.04-cu12.8
       options: "--gpus=all --ipc=host --user root -e PIP_CACHE_DIR=/root/.cache/pip -e CUDA_VISIBLE_DEVICES=2,3 -e HF_HOME=/root/.cache/huggingface --pull never"
       volumes:
         - /nvme/share_data/github-actions/pip-cache:/root/.cache/pip
