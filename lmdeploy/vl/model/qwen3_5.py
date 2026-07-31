@@ -29,6 +29,7 @@ class Qwen3_5Model(Qwen3VLModel):
     _arch = [
         'Qwen3_5ForConditionalGeneration',
         'Qwen3_5MoeForConditionalGeneration',
+        'InternS2MobiusForConditionalGeneration',
         'InternS2PreviewForConditionalGeneration',
         'InternS2PreviewForCausalLM',
     ]
@@ -118,7 +119,11 @@ class Qwen3_5Model(Qwen3VLModel):
             from transformers import Qwen3_5ForConditionalGeneration as AutoModelCls
         elif arch == 'Qwen3_5MoeForConditionalGeneration':
             from transformers import Qwen3_5MoeForConditionalGeneration as AutoModelCls
-        elif arch in ['InternS2PreviewForConditionalGeneration', 'InternS2PreviewForCausalLM']:
+        elif arch in [
+                'InternS2MobiusForConditionalGeneration',
+                'InternS2PreviewForConditionalGeneration',
+                'InternS2PreviewForCausalLM',
+        ]:
             from transformers import AutoModelForImageTextToText as AutoModelCls
         else:
             raise ValueError(f'Unsupported arch={arch}')
@@ -143,7 +148,11 @@ class Qwen3_5Model(Qwen3VLModel):
                     model.visual = model.model.visual
                     del model.model
                     del model.lm_head
-                elif arch in ['InternS2PreviewForConditionalGeneration', 'InternS2PreviewForCausalLM']:
+                elif arch in [
+                        'InternS2MobiusForConditionalGeneration',
+                        'InternS2PreviewForConditionalGeneration',
+                        'InternS2PreviewForCausalLM',
+                ]:
                     model = AutoModelCls.from_config(config, trust_remote_code=trust_remote_code)
                     model.visual = model.model.visual
                     model.time_series = model.model.time_series
@@ -160,6 +169,8 @@ class Qwen3_5Model(Qwen3VLModel):
                                              no_split_module_classes=[
                                                 'Qwen3_5VisionBlock',
                                                 'Qwen3_5MoeVisionBlock',
+                                                'InternS2MobiusDecoderLayer',
+                                                'InternS2MobiusVisionBlock',
                                                 'InternS2PreviewDecoderLayer',
                                                 'InternS2PreviewVisionBlock'
                                             ],
