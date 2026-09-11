@@ -230,6 +230,9 @@ with set_envs():
     # DSA indexer score memory
     dsa_indexer_max_logits_mb = max(1, env_to_int('LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB', 512))
 
+    # Disable dense prefill for GLM sparse MLA. Unsupported for DeepSeek; set before startup.
+    mla_disable_dense_prefill = env_to_bool('LMDEPLOY_MLA_DISABLE_DENSE_PREFILL', False)
+
     # cudagraph
     # fake capture flag for debug cudagraph padding behavior
     fake_capture = env_to_bool('LMDEPLOY_FAKE_CUDA_GRAPH_CAPTURE', False)
