@@ -1381,6 +1381,32 @@ class BaseModelAgent:
             if self.memdecode_agent is not None:
                 self.memdecode_agent.reset_graph_runner()
 
+    def _split_main_and_draft_weights(self, weights):
+        """Route HF-named update tensors before model-specific renaming."""
+        if not self.spec_agent.is_enabled():
+            return weights, []
+
+        method = self.spec_agent.method
+        if method == 'qwen3_5_mtp':
+            draft_prefixes = ('mtp.', )
+        elif method == 'deepseek_mtp':
+            # DeepSeek/GLM store physical MTP layers after the main stack, not
+            # under mtp.*. Use the draft HF config: ModelConfig.num_layers is
+            # only the number of draft layers. This config also exists on
+            # follower ranks that have no local proposer/model.
+            config = self.spec_agent.model_config.hf_config
+            start = config.num_hidden_layers
+            count = getattr(config, 'num_nextn_predict_layers', 1)
+            draft_prefixes = tuple(f'model.layers.{idx}.' for idx in range(start, start + count))
+        else:
+            return weights, []
+
+        main, draft = [], []
+        for name, weight in weights:
+            destination = draft if name.startswith(draft_prefixes) else main
+            destination.append((name, weight))
+        return main, draft
+
     @torch.inference_mode()
     def update_params(self, request: UpdateParamsRequest):
         """Update params."""
@@ -1423,14 +1449,6 @@ class BaseModelAgent:
                 return list(bucket.reconstruct_tensors())
             return [(k, _construct(v)) for k, v in weights]
 
-        def _split_main_and_draft(weights):
-            # TODO, zhouxinyu, support split and update weights for other mtp methods
-            if not self.spec_agent.is_enabled() or self.spec_agent.method != 'qwen3_5_mtp':
-                return weights, []
-            main = [(name, weight) for name, weight in weights if not name.startswith('mtp.')]
-            draft = [(name, weight) for name, weight in weights if name.startswith('mtp.')]
-            return main, draft
-
         with self.all_context():
             # After deserialization, weights is a dict with following keys:
             # - metadata: List[FlattenedTensorMetadata]
@@ -1445,7 +1463,7 @@ class BaseModelAgent:
             spec_model = self.spec_agent.get_model()
 
             weights = _deserialize_weights(serialized_data)
-            main_weights, draft_weights = _split_main_and_draft(weights)
+            main_weights, draft_weights = self._split_main_and_draft_weights(weights)
 
             for m, w, tag in [(model, main_weights, 'main'), (spec_model, draft_weights, 'draft')]:
                 if m is None or not w:
@@ -1540,12 +1558,7 @@ class BaseModelAgent:
 
                 model = self.patched_model.get_model() if self.patched_model is not None else None
                 spec_model = self.spec_agent.get_model()
-                # Same draft-split rule as update_params (currently only qwen3_5_mtp).
-                if self.spec_agent.is_enabled() and self.spec_agent.method == 'qwen3_5_mtp':
-                    main_weights = [(n, w) for n, w in weights if not n.startswith('mtp.')]
-                    draft_weights = [(n, w) for n, w in weights if n.startswith('mtp.')]
-                else:
-                    main_weights, draft_weights = weights, []
+                main_weights, draft_weights = self._split_main_and_draft_weights(weights)
 
                 for m, w, tag in [(model, main_weights, 'main'), (spec_model, draft_weights, 'draft')]:
                     if m is None or not w:
