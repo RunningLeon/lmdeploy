@@ -1,13 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import asyncio
 import json
-import os
 
 from dlslime import RDMAEndpoint, available_nic
 
 from lmdeploy.logger import get_logger
+from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.disagg.backend.backend import MIGRATION_BACKENDS
-from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl
+from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl, run_transfer_in_executor
 from lmdeploy.pytorch.disagg.config import DistServeEngineConfig, MigrationBackend
 from lmdeploy.pytorch.disagg.conn.protocol import (
     DistServeInitRequest,
@@ -17,8 +16,6 @@ from lmdeploy.pytorch.disagg.conn.protocol import (
 from lmdeploy.pytorch.disagg.messages import DistServeRegisterMRMessage, MigrationAssignment
 
 logger = get_logger('lmdeploy')
-
-LMDEPLOY_USE_ASYNC_MIGRATION = os.environ.get('LMDEPLOY_USE_ASYNC_MIGRATION', None)
 
 
 class DLSlimeMigrationManagement:
@@ -66,9 +63,8 @@ class DLSlimeMigrationManagement:
         ) for assign in assignment.batch]
 
         future = self.endpoint[assignment.protocol].read(batch)
-        if LMDEPLOY_USE_ASYNC_MIGRATION:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, future.wait)
+        if _envs.use_async_migration:
+            return await run_transfer_in_executor(future.wait)
         else:
             return future.wait()
 

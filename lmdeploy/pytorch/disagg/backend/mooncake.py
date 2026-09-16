@@ -1,12 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import json
-import os
 import socket
 import subprocess
 
+from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.disagg.backend.backend import MIGRATION_BACKENDS
-from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl
+from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl, run_transfer_in_executor
 from lmdeploy.pytorch.disagg.config import MigrationBackend, MooncakeEngineConfig
 from lmdeploy.pytorch.disagg.conn.protocol import (
     DistServeInitRequest,
@@ -17,8 +17,6 @@ from lmdeploy.pytorch.disagg.messages import DistServeRegisterMRMessage, Migrati
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
-
-LMDEPLOY_USE_ASYNC_MIGRATION = os.environ.get('LMDEPLOY_USE_ASYNC_MIGRATION', None)
 
 
 def get_rdma_nics():
@@ -179,20 +177,13 @@ class MooncakeMigrationManagement:
 
     async def p2p_migrate(self, assignment: MigrationAssignment, async_op: bool = False):
         """Migrate data to the remote engine."""
-        if not LMDEPLOY_USE_ASYNC_MIGRATION:
+        if not _envs.use_async_migration:
             # For synchronous migration, call the method directly
             self._migrate(assignment)
         else:
-            # For asynchronous migration, use an async method
-            import asyncio
-            loop = asyncio.get_event_loop()
-            future = loop.create_future()
-
-            await loop.run_in_executor(None, self._migrate, assignment)
-
-            result = await future
-            if result != 0:
-                raise RuntimeError(f'Failed to perform async transfer: {result}')
+            # _migrate returns None on success and raises on transfer failure.
+            # The executor future is the completion source; no extra Future is needed.
+            await run_transfer_in_executor(self._migrate, assignment)
 
     def _migrate(self, assignment: MigrationAssignment):
         """Migrate data to the remote engine synchronously."""

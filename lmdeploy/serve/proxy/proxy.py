@@ -9,7 +9,9 @@ import random
 import threading
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from http import HTTPStatus
+from itertools import product
 from typing import Literal
 
 import aiohttp
@@ -23,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from lmdeploy.pytorch.disagg.config import DistServeRDMAConfig, EngineRole, RDMALinkType, ServingStrategy
 from lmdeploy.pytorch.disagg.conn.protocol import MigrationProtocol, MigrationRequest
-from lmdeploy.pytorch.disagg.conn.proxy_conn import PDConnectionPool
+from lmdeploy.pytorch.disagg.conn.proxy_conn import PDConnectionPool, positive_env
 from lmdeploy.pytorch.disagg.messages import PDConnectionMessage
 from lmdeploy.serve.openai.errors import create_error_response
 from lmdeploy.serve.openai.protocol import (
@@ -117,6 +119,8 @@ class NodeManager:
         self.migration_protocol = MigrationProtocol[migration_protocol]
         self.rdma_config = DistServeRDMAConfig(with_gdr=with_gdr, link_type=RDMALinkType[link_type])
         self.pd_connection_pool = PDConnectionPool()
+        self.connection_warmup_lock = asyncio.Lock()
+        self.connection_warmup_timeout = positive_env('LMDEPLOY_PD_WARMUP_TIMEOUT', 300)
         self.dummy_prefill = False
 
     def get_nodes(self, role: EngineRole) -> dict[str, Status]:
@@ -460,7 +464,15 @@ class NodeManager:
         return headers
 
 
-app = FastAPI(docs_url='/')
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        await node_manager.pd_connection_pool.close()
+
+
+app = FastAPI(docs_url='/', lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
@@ -552,15 +564,41 @@ def terminate_node_all():
 
 @app.post('/distserve/connection_warmup', dependencies=[Depends(validate_json_request)])
 async def connection_warmup():
-    await asyncio.gather(*[
-        node_manager.pd_connection_pool.connect(
-            PDConnectionMessage(
-                p_url=p_url,
-                d_url=d_url,
-                protocol=node_manager.migration_protocol,
-                rdma_config=node_manager.rdma_config,
-            )) for p_url in node_manager.prefill_nodes for d_url in node_manager.decode_nodes
-    ])
+    # Reject duplicate rounds before constructing any P x D work.
+    if node_manager.connection_warmup_lock.locked():
+        return create_error_response(HTTPStatus.CONFLICT, 'PD connection warmup is already running')
+    async with node_manager.connection_warmup_lock:
+        prefill_nodes = node_manager.prefill_nodes
+        decode_nodes = node_manager.decode_nodes
+        pairs = product(prefill_nodes, decode_nodes)
+
+        async def worker():
+            for p_url, d_url in pairs:
+                await node_manager.pd_connection_pool.connect(
+                    PDConnectionMessage(
+                        p_url=p_url,
+                        d_url=d_url,
+                        protocol=node_manager.migration_protocol,
+                        rdma_config=node_manager.rdma_config,
+                    ))
+
+        # A bounded worker set consumes the Cartesian product lazily. A semaphore
+        # around gather(P x D) would still allocate an unbounded number of tasks.
+        worker_count = min(32, node_manager.pd_connection_pool.max_connect_requests,
+                           len(prefill_nodes) * len(decode_nodes))
+        tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=node_manager.connection_warmup_timeout)
+        except asyncio.TimeoutError:
+            return create_error_response(HTTPStatus.GATEWAY_TIMEOUT, 'PD connection warmup timed out')
+        except Exception as exc:
+            logger.error(f'PD connection warmup failed: {exc}')
+            return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, 'PD connection warmup failed')
+        finally:
+            # gather does not cancel siblings when one worker fails.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     return JSONResponse({'SUCCESS': True})
 
 

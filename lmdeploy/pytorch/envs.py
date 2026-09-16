@@ -122,6 +122,9 @@ with set_envs():
     dp_master_addr = os.getenv('LMDEPLOY_DP_MASTER_ADDR', None)
     dp_master_port = os.getenv('LMDEPLOY_DP_MASTER_PORT', None)
 
+    # P/D KV migration (shared by the Mooncake and DLSlime backends)
+    use_async_migration = env_to_bool('LMDEPLOY_USE_ASYNC_MIGRATION', False)
+
     # executor
     executor_backend = os.getenv('LMDEPLOY_EXECUTOR_BACKEND', None)
 
