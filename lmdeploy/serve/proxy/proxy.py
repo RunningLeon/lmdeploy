@@ -9,6 +9,7 @@ import random
 import threading
 import time
 from collections import deque
+from contextlib import aclosing
 from http import HTTPStatus
 from typing import Literal
 
@@ -18,7 +19,7 @@ import requests
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from lmdeploy.pytorch.disagg.config import DistServeRDMAConfig, EngineRole, RDMALinkType, ServingStrategy
@@ -35,6 +36,7 @@ from lmdeploy.serve.openai.protocol import (
 )
 from lmdeploy.serve.proxy.utils import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg
 from lmdeploy.serve.utils.server_utils import validate_json_request
+from lmdeploy.serve.utils.streaming_response import ManagedStreamingResponse
 from lmdeploy.utils import get_logger
 
 from .streaming_response import ProxyStreamingResponse
@@ -360,7 +362,7 @@ class NodeManager:
                     async for line in response.content:
                         if line.strip():
                             yield line + b'\n\n'
-        except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
+        except (Exception, aiohttp.ClientError) as e:  # noqa
             logger.error(f'caught an exception: {e}')
             # exception happened, reduce unfinished num
             yield self.handle_api_timeout(node_url)
@@ -398,7 +400,7 @@ class NodeManager:
         except APIServerException:
             # raise APIServerException again to be caught by the outer layer
             raise
-        except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
+        except (Exception, aiohttp.ClientError) as e:  # noqa
             logger.error(f'caught an exception: {e}')
             # exception happened, reduce unfinished num
             yield self.handle_api_timeout(node_url)
@@ -570,6 +572,151 @@ async def cache_block_gc_to_be_migrated():
     raise NotImplementedError
 
 
+async def _forward_distserve(request, endpoint: str):
+    """Forward one P/D request using the Prefill engine's cache owner ID."""
+    if (isinstance(request, CompletionRequest) and isinstance(request.prompt, list)
+            and len(request.prompt) != 1):
+        return create_error_response(HTTPStatus.BAD_REQUEST, 'DistServe requires exactly one prompt.')
+
+    # Resolve the destination and establish the link before allocating Prefill
+    # cache. An unavailable Decode node or failed connection must not orphan it.
+    p_url = 'dummy:dummy'
+    prefill_info = {}
+    request_dict = request.model_dump()
+    try:
+        d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
+        if not d_url:
+            return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, 'No Decode node is available.')
+        if not node_manager.dummy_prefill:
+            p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
+            if not p_url:
+                return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, 'No Prefill node is available.')
+            if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
+                await node_manager.pd_connection_pool.connect(PDConnectionMessage(
+                    p_url=p_url, d_url=d_url, protocol=node_manager.migration_protocol,
+                    rdma_config=node_manager.rdma_config))
+    except Exception:
+        logger.exception('Failed to prepare the P/D connection')
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, 'Failed to prepare the P/D connection.')
+    if not node_manager.dummy_prefill:
+        prefill_request = copy.deepcopy(request_dict)
+        prefill_request.update(max_tokens=1, max_completion_tokens=1, stream=False,
+                               with_cache=True, preserve_cache=True)
+        start = node_manager.pre_call(p_url)
+        try:
+            prefill_info = json.loads(await node_manager.generate(prefill_request, p_url, endpoint))
+            if not isinstance(prefill_info, dict):
+                raise ValueError('Prefill response is not an object')
+        except Exception:
+            logger.exception('Invalid Prefill response')
+            return create_error_response(HTTPStatus.BAD_GATEWAY, 'Invalid Prefill response.')
+        finally:
+            node_manager.post_call(p_url, start)
+        if ('error' in prefill_info or 'error_code' in prefill_info or prefill_info.get('object') == 'error'):
+            return JSONResponse(prefill_info, status_code=HTTPStatus.BAD_GATEWAY)
+        # Never interpret OpenAI's public id as an internal engine session ID.
+        # Mixed-version P/D installations must upgrade their Prefill servers.
+        if type(prefill_info.get('cache_session_id')) is not int or prefill_info['cache_session_id'] < 0:
+            return create_error_response(HTTPStatus.BAD_GATEWAY,
+                                         'Prefill response is missing a valid cache_session_id; '
+                                         'upgrade the Prefill server together with the proxy.')
+
+    remote_session_id = prefill_info.get('cache_session_id', 0)
+    conn_key = (p_url, d_url)
+    submitted = False
+    completed = False
+    cleaned = False
+    response_owns_cleanup = False
+    start = None
+    if not node_manager.dummy_prefill:
+        node_manager.pd_connection_pool.shelf_prefill_session(conn_key, remote_session_id)
+
+    async def cleanup():
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        if start is not None:
+            node_manager.post_call(d_url, start)
+        if node_manager.dummy_prefill:
+            return
+        if not submitted:
+            # No Decode request can be reading these blocks yet. Bound cleanup
+            # independently of the inference timeout, which may be unlimited.
+            try:
+                result = await asyncio.wait_for(node_manager.generate(
+                    dict(remote_engine_id=p_url, remote_session_id=remote_session_id),
+                    p_url, '/distserve/free_cache'), timeout=10)
+                if json.loads(result).get('status') != 'SUCCESS':
+                    return  # Retain the shelf entry for node-failure GC.
+            except Exception:
+                logger.exception('Failed to release unused Prefill session %s', remote_session_id)
+                return
+        elif not completed:
+            # HTTP cancellation/failure does not prove that in-flight RDMA has
+            # stopped. Leave the owner on the shelf for Decode-failure GC; the
+            # successful migration ACK also carries this same internal ID.
+            return
+        node_manager.pd_connection_pool.unshelf_prefill_session(conn_key, remote_session_id)
+
+    try:
+        request_dict['migration_request'] = MigrationRequest(
+            protocol=node_manager.migration_protocol,
+            remote_engine_id=p_url,
+            remote_session_id=remote_session_id,
+            remote_block_ids=prefill_info.get('cache_block_ids') or [],
+            remote_token_id=(prefill_info.get('remote_token_ids') or [0])[-1],
+            is_dummy_prefill=node_manager.dummy_prefill).model_dump(mode='json')
+        start = node_manager.pre_call(d_url)
+        if request.stream:
+            async def stream():
+                nonlocal submitted, completed
+                submitted = True
+                success = False
+                error = False
+                try:
+                    async with aclosing(node_manager.stream_generate(request_dict, d_url, endpoint)) as response_stream:
+                        async for chunk in response_stream:
+                            # Only a normal final choice proves the stream completed;
+                            # transport and request-error payloads must keep GC ownership.
+                            metadata_chunk = chunk.encode() if isinstance(chunk, str) else chunk
+                            for line in metadata_chunk.splitlines():
+                                payload = line.removeprefix(b'data: ').strip()
+                                if not payload or payload == b'[DONE]':
+                                    continue
+                                try:
+                                    data = json.loads(payload)
+                                except (ValueError, TypeError):
+                                    continue
+                                if not isinstance(data, dict):
+                                    error = True
+                                    continue
+                                error |= 'error' in data or 'error_code' in data or data.get('object') == 'error'
+                                success |= any(choice.get('finish_reason') in ('stop', 'length', 'tool_calls')
+                                               for choice in data.get('choices', []))
+                            yield chunk
+                    completed = success and not error
+                finally:
+                    await cleanup()
+
+            response = ManagedStreamingResponse(stream(), cleanup_callbacks=[cleanup], media_type='text/event-stream')
+            response_owns_cleanup = True
+            return response
+        submitted = True
+        response = json.loads(await node_manager.generate(request_dict, d_url, endpoint))
+        completed = ('error' not in response and 'error_code' not in response
+                     and response.get('object') != 'error' and bool(response.get('choices')))
+        return JSONResponse(response)
+    except (ValueError, TypeError):
+        logger.exception('Invalid P/D response metadata')
+        return create_error_response(HTTPStatus.BAD_GATEWAY, 'Invalid P/D response metadata.')
+    finally:
+        # StreamingResponse owns cleanup after it has actually been consumed or
+        # closed. Before that point the request is still on the migration shelf.
+        if not response_owns_cleanup:
+            await cleanup()
+
+
 @app.post('/v1/chat/completions', dependencies=[Depends(validate_json_request)])
 async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Request = None):
     """Completion API similar to OpenAI's API.
@@ -672,78 +819,7 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
             node_manager.post_call(node_url, start)
             return JSONResponse(json.loads(response))
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
-        request_dict = request.model_dump()
-
-        # Prefill
-        prefill_request_dict = copy.deepcopy(request_dict)
-        prefill_request_dict['max_tokens'] = 1
-        prefill_request_dict['max_completion_tokens'] = 1
-        prefill_request_dict['stream'] = False
-        prefill_request_dict['with_cache'] = True
-        prefill_request_dict['preserve_cache'] = True
-
-        prefill_info = {}
-        p_url = 'dummy:dummy'
-        if not node_manager.dummy_prefill:
-            p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
-            if not p_url:
-                return node_manager.handle_unavailable_model(request.model)
-            logger.info(f'A Prefill request is dispatched to {p_url}')
-
-            start = node_manager.pre_call(p_url)
-            prefill_info = json.loads(await node_manager.generate(prefill_request_dict, p_url, '/v1/chat/completions'))
-            node_manager.post_call(p_url, start)
-
-        # # Decode
-        d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
-        if not d_url:
-            return node_manager.handle_unavailable_model(request.model)
-        logger.info(f'A Decode request is dispatched to {d_url}')
-
-        if not node_manager.dummy_prefill:
-            if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
-                await node_manager.pd_connection_pool.connect(
-                    PDConnectionMessage(
-                        p_url=p_url,
-                        d_url=d_url,
-                        protocol=node_manager.migration_protocol,
-                        rdma_config=node_manager.rdma_config,
-                    ))
-
-        # The public response ID is not the engine's cache owner.
-        remote_session_id = 0 if node_manager.dummy_prefill else prefill_info.get('cache_session_id')
-        if type(remote_session_id) is not int or remote_session_id < 0:
-            return create_error_response(HTTPStatus.BAD_GATEWAY,
-                                         'Prefill response is missing a valid cache_session_id; '
-                                         'upgrade the Prefill server together with the proxy.')
-        remote_block_ids = prefill_info.get('cache_block_ids') or []
-        remote_token_id = prefill_info.get('remote_token_ids')[-1] if prefill_info.get('remote_token_ids') else 0
-
-        request_dict['migration_request'] = MigrationRequest(
-            protocol=node_manager.migration_protocol,
-            remote_engine_id=p_url,
-            remote_session_id=remote_session_id,
-            remote_block_ids=remote_block_ids,
-            remote_token_id=remote_token_id,
-            is_dummy_prefill=node_manager.dummy_prefill).model_dump(mode='json')
-
-        start = node_manager.pre_call(d_url)
-        if not node_manager.dummy_prefill:
-            node_manager.pd_connection_pool.shelf_prefill_session((p_url, d_url), remote_session_id)
-        if request.stream is True:
-            response = node_manager.stream_generate(request_dict, d_url, '/v1/chat/completions')
-            background_task = node_manager.create_background_tasks(d_url, start)
-            resp = StreamingResponse(response, background=background_task, media_type='text/event-stream')
-        else:
-            response = await node_manager.generate(request_dict, d_url, '/v1/chat/completions')
-            node_manager.post_call(d_url, start)
-            resp = JSONResponse(json.loads(response))
-
-        if not node_manager.dummy_prefill:
-            node_manager.pd_connection_pool.unshelf_prefill_session((p_url, d_url), remote_session_id)
-
-        return resp
-
+        return await _forward_distserve(request, '/v1/chat/completions')
     else:
         raise ValueError(f'No serving strategy named {node_manager.serving_strategy}')
 
@@ -809,88 +885,7 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
             node_manager.post_call(node_url, start)
             return JSONResponse(json.loads(response))
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
-        request_dict = request.model_dump()
-
-        # Prefill
-        prefill_request_dict = copy.deepcopy(request_dict)
-        prefill_request_dict['max_tokens'] = 1
-        prefill_request_dict['stream'] = False
-        prefill_request_dict['with_cache'] = True
-        prefill_request_dict['preserve_cache'] = True
-
-        if not node_manager.dummy_prefill:
-            try:
-                p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
-            except Exception as e:
-                logger.error(f'error Msg: {str(e)}')
-                return {'status': 'Instance sch error, cannot find available p_url'}
-
-            if not p_url:
-                return node_manager.handle_unavailable_model(request.model)
-            logger.info(f'A Prefill request is dispatched to {p_url}')
-
-            start = node_manager.pre_call(p_url)
-            prefill_info = json.loads(await node_manager.generate(prefill_request_dict, p_url, '/v1/completions'))
-            node_manager.post_call(p_url, start)
-        else:
-            p_url = 'dummy:dummy'
-            prefill_info = {}
-
-        # Decode
-        try:
-            d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
-        except Exception as e:
-            logger.error(f'error Msg: {str(e)}')
-            return {'status': 'Instance sch error, cannot find available p_url'}
-
-        if not d_url:
-            return node_manager.handle_unavailable_model(request.model)
-        logger.info(f'A Decode request is dispatched to {d_url}')
-
-        if not node_manager.dummy_prefill:
-            if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
-                try:
-                    await node_manager.pd_connection_pool.connect(
-                        PDConnectionMessage(
-                            p_url=p_url,
-                            d_url=d_url,
-                            protocol=node_manager.migration_protocol,
-                            rdma_config=node_manager.rdma_config,
-                        ))
-                except Exception as e:
-                    logger.error(f'error Msg: {str(e)}')
-                    return {'status': f'Connection error, cannot establish connection {(p_url, d_url)}'}
-
-        # The public response ID is not the engine's cache owner.
-        remote_session_id = 0 if node_manager.dummy_prefill else prefill_info.get('cache_session_id')
-        if type(remote_session_id) is not int or remote_session_id < 0:
-            return create_error_response(HTTPStatus.BAD_GATEWAY,
-                                         'Prefill response is missing a valid cache_session_id; '
-                                         'upgrade the Prefill server together with the proxy.')
-        remote_block_ids = prefill_info.get('cache_block_ids') or []
-        remote_token_id = prefill_info.get('remote_token_ids')[-1] if prefill_info.get('remote_token_ids') else 0
-        request_dict['migration_request'] = MigrationRequest(
-            protocol=node_manager.migration_protocol,
-            remote_engine_id=p_url,
-            remote_session_id=remote_session_id,
-            remote_block_ids=remote_block_ids,
-            remote_token_id=remote_token_id,
-            is_dummy_prefill=node_manager.dummy_prefill).model_dump(mode='json')
-
-        start = node_manager.pre_call(d_url)
-        if not node_manager.dummy_prefill:
-            node_manager.pd_connection_pool.shelf_prefill_session((p_url, d_url), remote_session_id)
-        if request.stream is True:
-            response = node_manager.stream_generate(request_dict, d_url, '/v1/completions')
-            background_task = node_manager.create_background_tasks(d_url, start)
-            resp = StreamingResponse(response, background=background_task, media_type='text/event-stream')
-        else:
-            response = await node_manager.generate(request_dict, d_url, '/v1/completions')
-            node_manager.post_call(d_url, start)
-            resp = JSONResponse(json.loads(response))
-        if not node_manager.dummy_prefill:
-            node_manager.pd_connection_pool.unshelf_prefill_session((p_url, d_url), remote_session_id)
-        return resp
+        return await _forward_distserve(request, '/v1/completions')
     else:
         raise ValueError(f'No serving strategy named {node_manager.serving_strategy}')
 

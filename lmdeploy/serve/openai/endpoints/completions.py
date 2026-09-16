@@ -130,6 +130,9 @@ def register(router: APIRouter, server_context) -> None:
         migration_request = json_request.pop('migration_request', None)
         with_cache = json_request.pop('with_cache', False)
         preserve_cache = json_request.pop('preserve_cache', False)
+        if with_cache and isinstance(request.prompt, list) and len(request.prompt) != 1:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'with_cache requires exactly one prompt.')
         if migration_request:
             migration_request = MigrationRequest.model_validate(
                 migration_request)

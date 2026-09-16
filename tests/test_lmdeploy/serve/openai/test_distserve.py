@@ -222,3 +222,160 @@ def test_proxy_rejects_invalid_cache_owner_without_public_id_fallback(monkeypatc
         assert not pool.migration_session_shelf
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(('chat', 'mode'), [
+    (False, 'normal'), (True, 'normal'),
+    (False, 'nonstream'), (True, 'nonstream'),
+    (False, 'unconsumed'), (True, 'unconsumed'),
+    (False, 'decode_error'), (False, 'disconnect'), (False, 'unavailable'), (False, 'connect_error'),
+    (False, 'missing_owner'), (False, 'invalid_metadata'), (False, 'batch'),
+    (False, 'transport_bytes'), (False, 'transport_text'), (False, 'protocol_error'),
+])
+def test_proxy_uses_cache_owner_and_keeps_safe_cleanup_ownership(prefill, monkeypatch, chat, mode):
+    proxy = importlib.import_module('lmdeploy.serve.proxy.proxy')
+    context, engine, app = prefill
+    pool = PDConnectionPool()
+    pool.is_connected = lambda *args: mode != 'connect_error'
+    calls = []
+    stream_closed = []
+
+    async def connect(*args):
+        raise TimeoutError('simulated connection failure')
+
+    pool.connect = connect
+
+    async def generate(payload, url, endpoint):
+        calls.append((url, endpoint, payload))
+        if endpoint == '/distserve/free_cache':
+            assert engine.end_session(payload['remote_session_id'])
+            return json.dumps(dict(status='SUCCESS'))
+        if url == 'd':
+            sid = payload['migration_request']['remote_session_id']
+            assert sid == context.async_engine.ids[-1]
+            assert pool.migration_session_shelf[('p', 'd')] == {sid}
+            assert engine.end_session(sid)
+            return json.dumps(dict(choices=[dict(finish_reason='stop')]))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://prefill') as client:
+            assert payload['max_tokens'] == payload['max_completion_tokens'] == 1
+            result = (await client.post(endpoint, json=payload)).json()
+            if mode == 'missing_owner':
+                result.pop('cache_session_id')
+            elif mode == 'invalid_metadata':
+                result['cache_block_ids'] = 'not-a-list'
+            return json.dumps(result)
+
+    async def stream_generate(payload, url, endpoint):
+        sid = payload['migration_request']['remote_session_id']
+        assert sid == context.async_engine.ids[-1]
+        assert pool.migration_session_shelf[('p', 'd')] == {sid}
+        try:
+            if mode == 'disconnect':
+                yield b'data: {"choices": [{"delta": {"content": "hi"}}]}\n\n'
+                await asyncio.Event().wait()
+            elif mode == 'decode_error':
+                yield b'data: {"error": {"message": "migration failed"}}\n\n'
+            elif mode in ('transport_bytes', 'transport_text', 'protocol_error'):
+                # A final-looking choice must not hide an error that follows it.
+                yield b'data: {"choices": [{"finish_reason": "stop"}]}\n\n'
+                if mode == 'protocol_error':
+                    yield proxy.create_error_response(500, 'Decode failed').body.decode()
+                else:
+                    class FailingSession:
+                        async def __aenter__(self):
+                            raise proxy.aiohttp.ClientConnectionError('simulated transport failure')
+
+                        async def __aexit__(self, *args):
+                            pass
+
+                    monkeypatch.setattr(proxy.aiohttp, 'ClientSession', FailingSession)
+                    transport = object.__new__(proxy.NodeManager)
+                    async for chunk in transport.stream_generate(payload, url, endpoint):
+                        # The real timeout fallback is bytes; also accept text
+                        # emitted by other StreamingResponse-compatible sources.
+                        assert isinstance(chunk, bytes)
+                        yield chunk.decode() if mode == 'transport_text' else chunk
+            else:
+                # Real scheduler ACK cleanup, with the ID supplied to Decode by Proxy.
+                assert engine.end_session(sid)
+                yield b'data: {"choices": [{"finish_reason": "stop"}]}\n\n'
+            yield b'data: [DONE]\n\n'
+        finally:
+            stream_closed.append(True)
+
+    manager = SimpleNamespace(
+        dummy_prefill=False, migration_protocol=MigrationProtocol.RDMA, rdma_config=None,
+        pd_connection_pool=pool, generate=generate, stream_generate=stream_generate,
+        get_node_url=lambda model, role: (None if mode == 'unavailable'
+                                         else ('p' if role == EngineRole.Prefill else 'd')),
+        pre_call=lambda url: 0, post_call=lambda *args: None, handle_unavailable_model=lambda model: 'unavailable')
+    monkeypatch.setattr(proxy, 'node_manager', manager)
+
+    async def run():
+        request = _request(chat, stream=mode != 'nonstream', max_completion_tokens=8)
+        if mode == 'batch':
+            request.prompt = ['one', 'two']
+        endpoint = '/v1/chat/completions' if chat else '/v1/completions'
+        if mode in ('connect_error', 'invalid_metadata', 'unavailable'):
+            response = await proxy._forward_distserve(request, endpoint)
+            assert response.status_code == (502 if mode == 'invalid_metadata' else 503)
+        else:
+            response = await proxy._forward_distserve(request, endpoint)
+            if mode in ('missing_owner', 'batch'):
+                assert response.status_code == (502 if mode == 'missing_owner' else 400)
+            elif mode not in ('unavailable', 'nonstream'):
+                assert pool.migration_session_shelf[('p', 'd')] == {0}
+                if mode == 'disconnect':
+                    await response.body_iterator.__anext__()
+                elif mode != 'unconsumed':
+                    async for _ in response.body_iterator:
+                        pass
+                await response.close()
+        if mode in ('decode_error', 'disconnect', 'transport_bytes', 'transport_text', 'protocol_error'):
+            assert stream_closed == [True]
+            # A failed HTTP request may leave an RDMA read in flight. Do not free
+            # its blocks prematurely; keep the correct ID for node-failure GC.
+            assert pool.migration_session_shelf[('p', 'd')] == {0}
+            assert engine.end_session(0)
+        elif mode == 'missing_owner':
+            # Old servers cannot supply an unambiguous cleanup owner. Fail closed,
+            # rather than treating the response's public id as an engine id.
+            assert not pool.migration_session_shelf
+            assert engine.end_session(0)
+        else:
+            assert not pool.migration_session_shelf
+            assert not engine.scheduler.sessions
+        if mode in ('unavailable', 'connect_error', 'batch'):
+            assert not calls  # No Prefill allocation before Decode is ready.
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('prompts', [[], ['first', 'second']])
+def test_cache_transfer_rejects_multiple_or_empty_prompts_before_generation(prefill, stream, prompts):
+    context, engine, app = prefill
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://prefill') as client:
+            response = await client.post('/v1/completions', json=dict(
+                model='fake-model', prompt=prompts, stream=stream, with_cache=True, preserve_cache=True))
+            assert response.status_code == 400
+            assert 'exactly one prompt' in response.text
+            assert not context.async_engine.ids
+            assert not engine.scheduler.sessions
+
+    asyncio.run(run())
+
+
+def test_unshelf_cache_owner_is_idempotent_and_preserves_other_owners():
+    pool = PDConnectionPool()
+    key = ('prefill', 'decode')
+    pool.unshelf_prefill_session(key, 1)
+    pool.shelf_prefill_session(key, 1)
+    pool.shelf_prefill_session(key, 2)
+    pool.unshelf_prefill_session(key, 1)
+    pool.unshelf_prefill_session(key, 1)
+    assert pool.migration_session_shelf[key] == {2}
+    pool.unshelf_prefill_session(key, 2)
+    assert key not in pool.migration_session_shelf

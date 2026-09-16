@@ -120,7 +120,11 @@ class PDConnectionPool:
         self.migration_session_shelf[conn_key].add(session_id)
 
     def unshelf_prefill_session(self, conn_key: tuple[str, str], session_id: int):
-        self.migration_session_shelf[conn_key].remove(session_id)
+        sessions = self.migration_session_shelf.get(conn_key)
+        if sessions is not None:
+            sessions.discard(session_id)
+            if not sessions:
+                self.migration_session_shelf.pop(conn_key, None)
 
     async def connect(self, conn_req: PDConnectionMessage):
 
