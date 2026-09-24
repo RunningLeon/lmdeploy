@@ -336,7 +336,8 @@ class FusedMoEBlockedF8(FusedMoEBase):
                 state['recv_hidden_states'] = state['fusedmoe'].fusedmoe_forward(state, self.gate_up.weight,
                                                                                  self.gate_up.weight_scale_inv,
                                                                                  self.down.weight,
-                                                                                 self.down.weight_scale_inv)
+                                                                                 self.down.weight_scale_inv,
+                                                                                 act_func=self.act_func)
             gemm_state = {
                 'fusedmoe': state['fusedmoe'],
                 'hidden_states': state['recv_hidden_states'],
@@ -347,7 +348,8 @@ class FusedMoEBlockedF8(FusedMoEBase):
             state['recv_hidden_states'] = state['fusedmoe'].fusedmoe_forward(state, self.gate_up.weight,
                                                                              self.gate_up.weight_scale_inv,
                                                                              self.down.weight,
-                                                                             self.down.weight_scale_inv)
+                                                                             self.down.weight_scale_inv,
+                                                                                 act_func=self.act_func)
             gemm_state = {
                 'fusedmoe': state['fusedmoe'],
                 'hidden_states': state['recv_hidden_states'],

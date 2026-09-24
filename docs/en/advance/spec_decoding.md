@@ -145,6 +145,70 @@ When a DFlash block size is provided, it overrides
 `--speculative-num-draft-tokens` by setting the number of newly proposed
 tokens to `block_size - 1`.
 
+## GLM-5.3-Flash prefix caching
+
+GLM-5.3-Flash can reuse prefix caches with ordinary autoregressive decoding or
+`deepseek_mtp`. Enable `PytorchEngineConfig.enable_prefix_caching` in either mode.
+The following text-only example uses TP4; choose a TP size and cache budget that
+fit your hardware. Set `speculative_config=None` to disable MTP without disabling
+prefix caching.
+
+```python
+from lmdeploy import GenerationConfig, PytorchEngineConfig, pipeline
+from lmdeploy.messages import SpeculativeConfig
+
+if __name__ == '__main__':
+    engine = PytorchEngineConfig(
+        tp=4,
+        max_batch_size=4,
+        enable_prefix_caching=True,
+        prefix_cache_state_budget=8,
+        max_prefill_token_num=512,
+        language_model_only=True,
+    )
+    spec = SpeculativeConfig(method='deepseek_mtp', num_speculative_tokens=3)
+    with pipeline('/path/to/GLM-5.3-Flash', backend_config=engine,
+                  speculative_config=spec) as pipe:
+        notes = 'A rectangle has four sides and four right angles. ' * 80
+        prompt = notes + '\nHow many sides does a rectangle have?'
+        generation = GenerationConfig(max_new_tokens=128, do_sample=False)
+        cold = pipe(prompt, gen_config=generation)
+        warm = pipe(prompt, gen_config=generation)
+        print(cold.cached_tokens, warm.cached_tokens)
+```
+
+### Cache geometry and boundaries
+
+- The model normalizes its cache to **64-token logical blocks and 64-token
+  kernel pages, with 16-entry KPool storage pages**, including when prefix caching is disabled. An explicitly
+  configured `num_gpu_blocks` counts logical blocks, not kernel pages.
+- A hit needs both complete KV/KPool owners and an exact recurrent-state
+  checkpoint. Prefill may be split at an aligned boundary to create a reusable
+  checkpoint; at least one prompt token is left to compute the output. A short
+  prompt or an evicted checkpoint can therefore produce no hit.
+- MTP cache identity also includes the next prompt token needed by the shifted
+  draft input. Matching the first 64 tokens alone is insufficient if token 65
+  differs. Tentative draft tokens and the final sampled-token-dependent owner
+  are not published as shared prefixes.
+- `prefix_cache_state_budget` reserves additional state slots. Zero means no
+  dedicated reservation, not that checkpoint creation is disabled: idle runtime
+  slots may be borrowed. More slots consume more memory, especially with MTP.
+- Keep `prefix_cache_decode_state_interval=0` with MTP: this implementation
+  publishes prefill checkpoints only. Without MTP, nonzero intervals must be
+  multiples of 64. PD migration is not supported by this GLM cache layout.
+
+The native FP8 CUDA path also supports DP/EP serving, for example `--tp 2 --dp 2
+--ep 4`. Enable text-prefill PCG with `--piecewise-cudagraph-max-tokens 512`
+and `--max-prefill-token-num 512`. Startup warmup prepares these plans; skipping
+warmup leaves unprepared prefills eager. Vision-bearing chunks also fall back to
+eager execution. MTP draft prefill remains eager, while supported decode steps
+use the ordinary CUDA graph path. These choices are independent of prefix caching.
+
+Inspect `Response.cached_tokens` to verify actual reuse. Changing prefill,
+PCG padding, batch shapes or parallel topology can change FP8 generation trajectories; compare task accuracy and
+MTP acceptance as well as cache hits rather than assuming bitwise-identical
+outputs or a guaranteed speedup.
+
 ## Guided Decoding with Speculative Decoding
 
 Speculative decoding (MTP) can be combined with [structured output](./structed_output.md) so that the draft tokens proposed by the spec model also respect the grammar constraints (e.g. JSON schema, regex). This significantly improves the acceptance rate compared to running spec decoding without grammar masks.

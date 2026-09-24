@@ -185,7 +185,10 @@ class LongContextChunker:
 
     def is_long_context(self, seq: 'SchedulerSequence'):
         """Is long context."""
-        return seq.num_token_ids > self.max_prefill_token_num
+        limit = get_long_context_chunk_limit(seq, self.max_prefill_token_num)
+        # Preserve the existing multimodal admission path: set_seq() may
+        # subsequently decide that an enlarged multimodal chunk is final.
+        return seq.num_token_ids > min(self.max_prefill_token_num, limit)
 
     def set_seq(self, seq: 'SchedulerSequence'):
         """Set the sequence currently being chunked."""
@@ -204,14 +207,16 @@ class LongContextChunker:
         if seq is None:
             return 0, None
 
-        plan = plan_long_context_chunk(seq, self.max_prefill_num, self.multimodals)
+        limit = get_long_context_chunk_limit(seq, self.max_prefill_num)
+        plan = plan_long_context_chunk(seq, limit, self.multimodals)
         return plan.chunk_size, plan.multimodals
 
     def is_last_chunk(self):
         """Is last chunk."""
         if self.seq is None:
             return True
-        return self.seq.num_token_ids <= self.max_prefill_num
+        limit = get_long_context_chunk_limit(self.seq, self.max_prefill_num)
+        return self.seq.num_token_ids <= limit
 
     def clear(self):
         """Clear."""
@@ -425,7 +430,8 @@ class _ForwardInputsTask:
             # do not send an MTP-inclusive save with stale draft rows.
             return ()
         token_lens = inputs.history_lengths + inputs.seq_length
-        if (self.maker.spec_decoding and inputs.is_chunk and not inputs.is_last_chunk):
+        if (self.maker.spec_decoding and inputs.is_chunk and not inputs.is_last_chunk
+                and not getattr(inputs, 'draft_full_prefill', False)):
             token_lens = token_lens.sub(1).clamp_min(0)
         return tuple(token_lens.tolist())
 
@@ -1067,6 +1073,7 @@ class InputsMakerAsync:
             model_metas=model_metas,
         )
         if is_prefill:
+            model_inputs.draft_full_prefill = bool(messages[0]._seq_meta.prefix_cache_token_lookahead)
             model_inputs = fill_logits_indices(model_inputs, messages, [len(ids) for ids in token_ids])
 
         # adapters
@@ -1128,6 +1135,11 @@ class InputsMakerAsync:
             model_metas=model_metas,
             is_chunk=True,
         )
+        if seq._seq_meta.prefix_cache_token_lookahead:
+            model_inputs.draft_full_prefill = True
+            model_inputs.draft_chunk_next_token_ids = torch.as_tensor(seq.token_ids[chunk_size:chunk_size + 1])
+            if model_inputs.draft_chunk_next_token_ids.numel() != 1:
+                raise ValueError('A non-final shifted draft chunk requires one known prompt lookahead token.')
         model_inputs = fill_logits_indices(model_inputs, [seq], [chunk_size])
 
         # adapters
