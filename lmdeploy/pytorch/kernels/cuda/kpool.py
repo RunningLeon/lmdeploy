@@ -63,47 +63,32 @@ def kpool_prefill_metadata(q_seqlens, kv_seqlens, rows, pool_size):
 @triton.jit
 def _partition_kpool_kernel(
     Keys, Scores, TailKeys, TailScores, StateIds, QLens, KVLens,
-    ClosedKeys, ClosedScores, GroupIds, RequestIds, Valid, NextKeys, NextScores,
-    BATCH: tl.constexpr, CAPACITY: tl.constexpr, STATES: tl.constexpr,
+    ClosedKeys, ClosedScores, GroupIds, RequestIds, Valid,
+    BATCH: tl.constexpr, STATES: tl.constexpr,
     POOL: tl.constexpr, WIDTH: tl.constexpr, BLOCK_B: tl.constexpr, BLOCK_D: tl.constexpr,
     STRIDE_TK: tl.constexpr, STRIDE_TS: tl.constexpr,
 ):
     row = tl.program_id(0)
     slots = tl.arange(0, POOL)
     d = tl.arange(0, BLOCK_D)
-    group = tl.full((), 0, tl.int64)
-    if row < CAPACITY:
-        batches = tl.arange(0, BLOCK_B)
-        q = tl.load(QLens + batches, batches < BATCH, other=0)
-        kv = tl.load(KVLens + batches, batches < BATCH, other=0)
-        counts = ((kv - q) % POOL + q) // POOL
-        ends = tl.cumsum(counts)
-        request = tl.minimum(tl.sum(((row >= ends) & (batches < BATCH)).to(tl.int32)), BATCH - 1)
-        group_start = tl.sum(tl.where(batches == request, ends - counts, 0))
-        token_start = tl.sum(tl.where(batches < request, q, 0))
-        valid = row < tl.sum(counts)
-        q_len = tl.load(QLens + request)
-        kv_len = tl.load(KVLens + request)
-        history = kv_len - q_len
-        offsets = (row - group_start) * POOL + slots - history % POOL
-        group = (history // POOL + row - group_start).to(tl.int64)
-    else:
-        request = row - CAPACITY
-        batches = tl.arange(0, BLOCK_B)
-        q = tl.load(QLens + batches, batches < request, other=0)
-        token_start = tl.sum(q)
-        q_len = tl.load(QLens + request)
-        kv_len = tl.load(KVLens + request)
-        history = kv_len - q_len
-        offsets = ((history % POOL + q_len) // POOL) * POOL + slots - history % POOL
-        valid = True
+    batches = tl.arange(0, BLOCK_B)
+    q = tl.load(QLens + batches, batches < BATCH, other=0)
+    kv = tl.load(KVLens + batches, batches < BATCH, other=0)
+    counts = ((kv - q) % POOL + q) // POOL
+    ends = tl.cumsum(counts)
+    request = tl.minimum(tl.sum(((row >= ends) & (batches < BATCH)).to(tl.int32)), BATCH - 1)
+    group_start = tl.sum(tl.where(batches == request, ends - counts, 0))
+    token_start = tl.sum(tl.where(batches < request, q, 0))
+    valid = row < tl.sum(counts)
+    q_len = tl.load(QLens + request)
+    kv_len = tl.load(KVLens + request)
+    history = kv_len - q_len
+    offsets = (row - group_start) * POOL + slots - history % POOL
+    group = (history // POOL + row - group_start).to(tl.int64)
     state_id = tl.load(StateIds + request)
     valid = valid & (state_id >= 0) & (state_id < STATES)
-    active_slots = tl.full((POOL,), True, tl.int1)
-    if row >= CAPACITY:
-        active_slots = slots < kv_len % POOL
-    prior_mask = valid & active_slots & (offsets < 0)
-    token_mask = valid & active_slots & (offsets >= 0) & (offsets < q_len)
+    prior_mask = valid & (offsets < 0)
+    token_mask = valid & (offsets >= 0) & (offsets < q_len)
     prior_offsets = offsets + history % POOL
     old_k = tl.load(TailKeys + state_id * STRIDE_TK + prior_offsets[:, None] * WIDTH + d[None, :],
                     prior_mask[:, None] & (d[None, :] < WIDTH), other=0)
@@ -115,19 +100,15 @@ def _partition_kpool_kernel(
                     token_mask[:, None] & (d[None, :] < WIDTH), other=0)
     key = tl.where((offsets < 0)[:, None], old_k, new_k)
     score = tl.where((offsets < 0)[:, None], old_s, new_s)
-    if row < CAPACITY:
-        tl.store(ClosedKeys + (row * POOL + slots[:, None]) * WIDTH + d[None, :], key, d[None, :] < WIDTH)
-        tl.store(ClosedScores + (row * POOL + slots[:, None]) * WIDTH + d[None, :], score, d[None, :] < WIDTH)
-        tl.store(GroupIds + row, group)
-        tl.store(RequestIds + row, request)
-        tl.store(Valid + row, valid)
-    else:
-        tl.store(NextKeys + (request * POOL + slots[:, None]) * WIDTH + d[None, :], key, d[None, :] < WIDTH)
-        tl.store(NextScores + (request * POOL + slots[:, None]) * WIDTH + d[None, :], score, d[None, :] < WIDTH)
+    tl.store(ClosedKeys + (row * POOL + slots[:, None]) * WIDTH + d[None, :], key, d[None, :] < WIDTH)
+    tl.store(ClosedScores + (row * POOL + slots[:, None]) * WIDTH + d[None, :], score, d[None, :] < WIDTH)
+    tl.store(GroupIds + row, group)
+    tl.store(RequestIds + row, request)
+    tl.store(Valid + row, valid)
 
 
 def partition_kpool(keys, scores, tail_keys, tail_scores, state_ids, q_seqlens, kv_seqlens, pool_size):
-    """Assemble ragged closed pools and next tails without host metadata reads.
+    """Assemble only ragged closed pools without host metadata reads.
 
     Group capacity depends only on input shapes. Invalid group rows are zero padded and masked; persistent state is read
     but never modified here.
@@ -149,15 +130,15 @@ def partition_kpool(keys, scores, tail_keys, tail_scores, state_ids, q_seqlens, 
     groups = state_ids.new_empty(capacity)
     requests = state_ids.new_empty(capacity)
     valid = torch.empty(capacity, device=keys.device, dtype=torch.bool)
-    next_keys = tail_keys.new_empty((batch, pool_size, width))
-    next_scores = tail_scores.new_empty((batch, pool_size, width))
-    _partition_kpool_kernel[(capacity + batch,)](
+    if capacity == 0:
+        return closed_keys, closed_scores, groups, requests, valid
+    _partition_kpool_kernel[(capacity,)](
         keys.contiguous(), scores.contiguous(), tail_keys, tail_scores,
         state_ids.contiguous(), q_seqlens.contiguous(), kv_seqlens.contiguous(),
-        closed_keys, closed_scores, groups, requests, valid, next_keys, next_scores,
-        batch, capacity, tail_keys.size(0), pool_size, width, triton.next_power_of_2(batch),
+        closed_keys, closed_scores, groups, requests, valid,
+        batch, tail_keys.size(0), pool_size, width, triton.next_power_of_2(batch),
         triton.next_power_of_2(width), tail_keys.stride(0), tail_scores.stride(0), num_warps=4)
-    return closed_keys, closed_scores, groups, requests, valid, next_keys, next_scores
+    return closed_keys, closed_scores, groups, requests, valid
 
 
 @triton.jit

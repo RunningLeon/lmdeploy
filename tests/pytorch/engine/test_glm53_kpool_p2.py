@@ -139,7 +139,9 @@ def test_full_update_wrapper_matches_stateless_tail_oracle(device):
     indexer = SimpleNamespace(get_block_cache=lambda: cache, project_key=lambda x: x,
                               project_compress_score=lambda x: x * .125,
                               index_kpool_compress_ape=ape, scale_fmt='ue8m0', head_dim=128)
-    model = SimpleNamespace(indexer=indexer, index_kpool=4)
+    model = Glm5NextSparseAttention.__new__(Glm5NextSparseAttention)
+    torch.nn.Module.__init__(model)
+    model.indexer, model.index_kpool = indexer, 4
     ids = torch.tensor([1], device=device)
     table = torch.randperm(19, device=device)[None]+1
     ring = tuple(torch.zeros(3, 8, 128, device=device, dtype=torch.bfloat16) for _ in range(2))
@@ -157,8 +159,19 @@ def test_full_update_wrapper_matches_stateless_tail_oracle(device):
         tail[0][1, :n] = history_keys[h-n:h]
         tail[1][1, :n] = history_keys[h-n:h] * .125
         hidden = history_keys[h:h+q][None]
-        indexer.get_block_cache = lambda: reference_cache
-        Glm5NextSparseAttention._update_kpool_cache(model, hidden, tail, torch.ones_like(ids), metadata)
+        # Independent Torch partition/compression oracle, not the model wrapper.
+        from lmdeploy.pytorch.nn.kpool import (kpool_partition_update, kpool_compress,
+                                               kpool_quantize_fp8, kpool_write_packed_cache)
+        update = kpool_partition_update(hidden[0], hidden[0] * .125, h, 4,
+                                        tail[0][1, :n], tail[1][1, :n])
+        if update.closed_group_ids.numel():
+            values, scales = kpool_quantize_fp8(kpool_compress(
+                update.closed_keys, update.closed_scores, ape, mode='decode' if decode else 'extend'),
+                block_size=128, round_scale=True)
+            kpool_write_packed_cache(reference_cache, table[0], update.closed_group_ids, values, scales, 4)
+        for state, next_tail in zip(tail, (update.tail_keys, update.tail_scores)):
+            state[1].zero_()
+            state[1, :next_tail.size(0)].copy_(next_tail)
         indexer.get_block_cache = lambda: cache
         Glm5NextSparseAttention._update_kpool_cache(model, hidden, ring, ids, metadata)
         assert torch.equal(cache, reference_cache)
@@ -184,7 +197,9 @@ def test_raw_ring_decode_padding_cannot_overwrite_live_scratch(device):
     indexer = SimpleNamespace(get_block_cache=lambda: cache, project_key=lambda x: x,
                               project_compress_score=lambda x: x * .125,
                               index_kpool_compress_ape=ape, scale_fmt='ue8m0', head_dim=128)
-    model = SimpleNamespace(indexer=indexer, index_kpool=4)
+    model = Glm5NextSparseAttention.__new__(Glm5NextSparseAttention)
+    torch.nn.Module.__init__(model)
+    model.indexer, model.index_kpool = indexer, 4
     ring = tuple(torch.zeros(3, 8, 128, device=device, dtype=torch.bfloat16) for _ in range(2))
     ids = torch.tensor([1, -1], device=device)
     table = torch.tensor([[1, 2, 3, 4], [0, 0, 0, 0]], device=device)
@@ -279,3 +294,127 @@ def test_deepgemm_mqa_column_capability(monkeypatch, compact, pybind):
         assert kpool._mqa_has_local_columns() is compact
     finally:
         kpool._mqa_has_local_columns.cache_clear()
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_compact_page_table_is_alias_and_legacy_subsamples(device):
+    from lmdeploy.pytorch.nn.kpool import kpool_pooled_block_offsets
+    table = torch.arange(40, device=device).reshape(2, 20)[:, ::2]
+    assert not table.is_contiguous()
+    assert kpool_pooled_block_offsets(table, 4, 16) is table
+    torch.testing.assert_close(kpool_pooled_block_offsets(table, 4, 64), table[:, ::4])
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('steps', [1, 2, 4, 8])
+def test_pool_decode_does_not_copy_or_mutate_scratch(device, steps):
+    from types import SimpleNamespace
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from lmdeploy.pytorch.models.glm5_next import Glm5NextSparseAttention
+
+    class Copies(TorchDispatchMode):
+        count = 0
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func == torch.ops.aten.copy_.default and args[0].shape == (2, 4, 128):
+                self.count += 1
+            return func(*args, **(kwargs or {}))
+
+    layer = Glm5NextSparseAttention.__new__(Glm5NextSparseAttention)
+    torch.nn.Module.__init__(layer)
+    layer.index_kpool = 4
+    cache = torch.zeros(5, 16, 1, 132, device=device, dtype=torch.uint8)
+    layer.indexer = SimpleNamespace(get_block_cache=lambda: cache,
+        index_kpool_compress_ape=torch.zeros(4, 128, device=device), scale_fmt='ue8m0')
+    key = torch.randn(2 * steps, 128, device=device, dtype=torch.bfloat16)
+    tail = tuple(torch.randn(2, 4, 128, device=device, dtype=torch.bfloat16) for _ in range(2))
+    initial_tail = tuple(x.clone() for x in tail)
+    meta = SimpleNamespace(is_decoding=True, kv_seqlens=torch.tensor([3 + steps, steps], device=device),
+                           q_seqlens=torch.full((2,), steps, device=device),
+                           block_offsets=torch.tensor([[1], [0]], device=device))
+    valid = torch.tensor([True, False], device=device)
+    score = key * .125
+    counter = Copies()
+    with counter:
+        layer._write_kpool_pools(key, score, tail, valid, meta)
+    assert counter.count == 0
+    assert not cache[0].count_nonzero()
+    for actual, initial in zip(tail, initial_tail):
+        torch.testing.assert_close(actual, initial, rtol=0, atol=0)
+
+    if device == 'cuda':
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            layer._write_kpool_pools(key, score, tail, valid, meta)
+        # Replay with new tokens and a different pool boundary. Scratch addresses
+        # stay fixed, while intermediate assembled tensors belong to the graph.
+        key.normal_()
+        score.copy_(key * .125)
+        meta.kv_seqlens.add_(2)
+        cache.zero_()
+        layer._write_kpool_pools(key, score, tail, valid, meta)
+        expected_cache = cache.clone()
+        cache.zero_()
+        graph.replay()
+        torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
+        assert not cache[0].count_nonzero()
+        for actual, initial in zip(tail, initial_tail):
+            torch.testing.assert_close(actual, initial, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('steps', [1, 2, 4, 8])
+def test_row_local_decode_matches_generic_oracle_without_unused_tail_ops(monkeypatch, device, steps):
+    from types import SimpleNamespace
+    from torch.utils._python_dispatch import TorchDispatchMode
+    import lmdeploy.pytorch.models.glm5_next as model_module
+    from lmdeploy.pytorch.nn.kpool import kpool_decode_update
+
+    torch.manual_seed(47)
+    batch, pool, dim = 4, 4, 128
+    keys = torch.randn(batch, steps, dim, dtype=torch.bfloat16, device=device)
+    scores = torch.randn_like(keys)
+    tail = tuple(torch.randn(batch, pool, dim, dtype=keys.dtype, device=device) for _ in range(2))
+    expected_tail = tuple(x.clone() for x in tail)
+    history = torch.tensor([0, 2, 3, 63], device=device)
+    valid = torch.tensor([True, False, True, True], device=device)
+    expected = []
+    for step in range(steps):
+        update = kpool_decode_update(keys[:, step], scores[:, step], *expected_tail,
+                                     torch.arange(batch, device=device), history + step, pool)
+        expected.append(update)
+        expected_tail = update.next_tail_keys, update.next_tail_scores
+
+    class Operations(TorchDispatchMode):
+        counts = None
+        def __init__(self):
+            self.counts = {}
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            self.counts[str(func)] = self.counts.get(str(func), 0) + 1
+            return func(*args, **(kwargs or {}))
+
+    assembled, writes = [], []
+    def compress(k, s, *args, **kwargs):
+        assembled.append((k, s))
+        return k[:, 0], s[:, 0]
+    def write(cache, offsets, groups, k, s, pool_size, mask):
+        writes.append((groups, mask))
+    monkeypatch.setattr(model_module, 'kpool_compress_quantize_cuda', compress)
+    monkeypatch.setattr(model_module, 'kpool_write_decode_cuda', write)
+    monkeypatch.setattr(model_module, 'kpool_write_packed_cache_batched', write)
+    layer = model_module.Glm5NextSparseAttention.__new__(model_module.Glm5NextSparseAttention)
+    torch.nn.Module.__init__(layer)
+    layer.index_kpool = pool
+    layer.indexer = SimpleNamespace(get_block_cache=lambda: None, index_kpool_compress_ape=None, scale_fmt=None)
+    meta = SimpleNamespace(is_decoding=True, kv_seqlens=history + steps,
+                           q_seqlens=torch.full_like(history, steps), block_offsets=None)
+    operations = Operations()
+    with operations:
+        layer._write_kpool_pools(keys.flatten(0, 1), scores.flatten(0, 1), tail, valid, meta)
+    for (k, s), (groups, mask), ref in zip(assembled, writes, expected):
+        torch.testing.assert_close(k, ref.closed_keys, rtol=0, atol=0)
+        torch.testing.assert_close(s, ref.closed_scores, rtol=0, atol=0)
+        torch.testing.assert_close(groups, ref.group_ids)
+        torch.testing.assert_close(mask, ref.should_close & valid)
+    assert not any('index_select' in name or 'zeros_like' in name or '_local_scalar_dense' in name
+                   for name in operations.counts)
+    assert sum(n for name, n in operations.counts.items() if 'where' in name) == 2 * steps

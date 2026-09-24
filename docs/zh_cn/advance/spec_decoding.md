@@ -173,23 +173,13 @@ if __name__ == '__main__':
         print(cold.cached_tokens, warm.cached_tokens)
 ```
 
-### 缓存粒度与边界
+### 配置限制
 
-- 模型将实际缓存统一为 **64-token logical block / 64-token kernel page / 16-entry KPool storage page**，
-  关闭 prefix caching 时也使用这一布局。显式设置的 `num_gpu_blocks` 计数单位
-  是 logical block，而不是 kernel page。
-- 命中需要完整的 KV/KPool owner 和精确的 recurrent-state checkpoint。
-  Prefill 可能在对齐位置增加切分以产生可复用 checkpoint，并至少留下一个
-  prompt token 计算输出。短 prompt 或 checkpoint 被回收时可能没有命中。
-- MTP 的共享身份还包含 shifted draft input 所依赖的下一个 prompt token。
-  前 64 个 token 相同但第 65 个不同，不能复用同一个联合 owner。
-  未接受的 draft token 和依赖最终采样 token 的 owner 不会发布为共享前缀。
-- `prefix_cache_state_budget` 预留额外 state slot。设为零表示没有专用预留，
-  不表示禁止保存 checkpoint：仍可借用空闲 runtime slot。更多 slot 会占用
-  更多显存，尤其在开启 MTP 时。
-- MTP 下保持 `prefix_cache_decode_state_interval=0`，当前只发布 prefill
-  checkpoint；非 MTP 的非零 interval 必须为 64 的倍数。此 GLM 布局不支持
-  PD 迁移。
+- 缓存块大小为 64 tokens。手动设置 `num_gpu_blocks` 时按此计数，而不是按 KPool 条目计数。
+- `prefix_cache_state_budget` 为 checkpoint 预留额外状态槽，会增加显存占用。
+  设为零表示不额外预留，仍可复用空闲的运行时状态槽。
+- MTP 下保持 `prefix_cache_decode_state_interval=0`；非 MTP 的正值必须是 64 的倍数。
+- 暂不支持 PD 迁移。
 
 原生 FP8 CUDA 路径也支持 DP/EP 服务，例如 `--tp 2 --dp 2 --ep 4`。
 使用 `--piecewise-cudagraph-max-tokens 512 --max-prefill-token-num 512`

@@ -22,6 +22,7 @@ from lmdeploy.pytorch.backends.cuda.kpool import (
     kpool_score_paged_cuda,
     kpool_select_groups_cuda,
     kpool_select_prefill_cuda,
+    kpool_write_decode_cuda,
 )
 from lmdeploy.pytorch.configurations.glm5_next import is_glm5_kda_layer
 from lmdeploy.pytorch.consts import (
@@ -45,7 +46,6 @@ from lmdeploy.pytorch.nn import (
 )
 from lmdeploy.pytorch.nn.gated_delta import GatedDeltaMeta, GatedDeltaMetaBuilder, build_rmsnorm_gated
 from lmdeploy.pytorch.nn.kpool import (
-    kpool_decode_update,
     kpool_expand_selected_groups,
     kpool_partition_update,
     kpool_pooled_block_offsets,
@@ -438,7 +438,7 @@ class Glm5NextMLP(DeepseekV2MLP):
             kwargs['is_shared_expert'] = False
         super().__init__(config, *args, **kwargs)
         self.swiglu_limit = config.swiglu_limit
-        if get_dist_manager().current_config().dp == 1:
+        if dist_config.dp == 1:
             self.down_proj.tp_reduce_dtype = torch.float32
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -865,92 +865,80 @@ class Glm5NextSparseAttention(DeepseekV32Attention):
         key_states[..., :nope_size] = value_states
         return key_states, value_states, k_pe
 
-    def _update_kpool_cache(
-        self,
-        hidden_states: torch.Tensor,
-        tail_state: Sequence[torch.Tensor],
-        state_ids: torch.Tensor,
-        attn_metadata: Any,
-        *,
-        projected: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        """Compress closed pools and persist each request's unfinished tail."""
-        if tail_state is None or len(tail_state) != 2:
-            raise RuntimeError(
-                'GLM-5.3 KPool requires key and score tail state caches.')
-        if state_ids is None:
-            raise RuntimeError('GLM-5.3 KPool requires stable state cache ids.')
+    def _update_kpool_cache(self, hidden_states, tail_state, state_ids, attn_metadata):
+        """Target owns the raw ring; pool assembly only consumes a scratch tail."""
+        if tail_state is None or len(tail_state) != 2 or state_ids is None:
+            raise RuntimeError('GLM-5.3 KPool requires raw key/score rings and stable state ids.')
+        from lmdeploy.pytorch.kernels.cuda.kpool import read_raw_tail, write_raw_ring
+        history = attn_metadata.kv_seqlens - attn_metadata.q_seqlens
+        tail = read_raw_tail(*tail_state, state_ids, history, self.index_kpool)
+        key = self.indexer.project_key(hidden_states)[0]
+        score = self.indexer.project_compress_score(hidden_states)[0]
+        result = self._write_kpool_pools(key, score, tail, state_ids >= 0, attn_metadata)
+        write_raw_ring(*tail_state, key, score, state_ids, history,
+                       attn_metadata.q_seqlens, attn_metadata.cu_seqlens_q)
+        return result
 
+    def _write_kpool_pools(self, key, score, tail_state, valid_rows, attn_metadata):
+        """Write closed pools; caller owns persistence of raw projected tokens.
+
+        Tail storage is scratch, never a persistent target or draft state.
+        Decode carries assembled tensors forward without mutating the scratch.
+        """
         tail_k_state, tail_score_state = tail_state
         history_lengths = attn_metadata.kv_seqlens - attn_metadata.q_seqlens
-        # Target stores raw projected history, addressed by absolute token
-        # position. Draft supplies an ephemeral pool-sized tail from its pages.
-        raw_states = tail_state if tail_k_state.size(1) != self.index_kpool else None
-        raw_state_ids = state_ids
-        if raw_states is not None:
-            from lmdeploy.pytorch.kernels.cuda.kpool import read_raw_tail
-            tail_k_state, tail_score_state = read_raw_tail(
-                *raw_states, state_ids, history_lengths, self.index_kpool)
-            state_ids = torch.arange(state_ids.numel(), device=state_ids.device)
-
-        def save_raw():
-            if raw_states is None:
-                return
-            from lmdeploy.pytorch.kernels.cuda.kpool import write_raw_ring
-            write_raw_ring(*raw_states, key.reshape(-1, key.size(-1)),
-                           score.reshape(-1, score.size(-1)), raw_state_ids,
-                           history_lengths, attn_metadata.q_seqlens,
-                           attn_metadata.cu_seqlens_q)
-
         indexer_k_cache = self.indexer.get_block_cache()
-        if projected is None:
-            projected = (self.indexer.project_key(hidden_states)[0],
-                         self.indexer.project_compress_score(hidden_states)[0])
-        key, score = projected
         if attn_metadata.is_decoding:
-            batch_size = state_ids.numel()
+            batch_size = valid_rows.numel()
             if key.size(0) % batch_size:
                 raise RuntimeError(
                     'KPool decode rows must be divisible by request count.')
             steps = key.size(0) // batch_size
             key = key.unflatten(0, (batch_size, steps))
             score = score.unflatten(0, (batch_size, steps))
+            slots = torch.arange(self.index_kpool, device=key.device)[None, :, None]
             for step in range(steps):
-                update = kpool_decode_update(
-                    key[:, step], score[:, step], tail_k_state,
-                    tail_score_state, state_ids, history_lengths + step,
-                    self.index_kpool)
+                history = history_lengths + step
+                tail_lengths = history.remainder(self.index_kpool)
+                previous_valid = slots < tail_lengths[:, None, None]
+                # Scratch is already row-local. Mask stale slots on consumption
+                # rather than gathering identity rows or clearing a next-tail
+                # that the final step never consumes.
+                closed_keys = torch.where(previous_valid, tail_k_state, 0)
+                closed_scores = torch.where(previous_valid, tail_score_state, 0)
+                insert_at = tail_lengths[:, None, None].expand(-1, 1, key.size(-1))
+                closed_keys.scatter_(1, insert_at, key[:, step, None, :])
+                closed_scores.scatter_(1, insert_at, score[:, step, None, :])
+                group_ids = history.div(self.index_kpool, rounding_mode='floor')
+                should_close = (tail_lengths == self.index_kpool - 1) & valid_rows
                 pooled_fp8, pooled_scale = kpool_compress_quantize_cuda(
-                    update.closed_keys, update.closed_scores,
+                    closed_keys, closed_scores,
                     self.indexer.index_kpool_compress_ape,
                     mode='decode', round_scale=self.indexer.scale_fmt is not None)
-                kpool_write_packed_cache_batched(
+                writer = kpool_write_decode_cuda if key.is_cuda else kpool_write_packed_cache_batched
+                writer(
                     indexer_k_cache, attn_metadata.block_offsets,
-                    update.group_ids, pooled_fp8, pooled_scale,
-                    self.index_kpool, update.should_close & (raw_state_ids >= 0))
-                tail_k_state.index_copy_(0, update.safe_state_ids,
-                                        update.next_tail_keys)
-                tail_score_state.index_copy_(0, update.safe_state_ids,
-                                            update.next_tail_scores)
-            save_raw()
+                    group_ids, pooled_fp8, pooled_scale,
+                    self.index_kpool, should_close)
+                tail_k_state = closed_keys
+                tail_score_state = closed_scores
             return indexer_k_cache
 
         if key.is_cuda:
-            prefill_ids = state_ids if raw_states is None else torch.where(raw_state_ids >= 0, state_ids, -1)
+            state_ids = torch.arange(valid_rows.numel(), device=valid_rows.device)
             kpool_prefill_update_cuda(
-                key, score, tail_k_state, tail_score_state, prefill_ids,
+                key, score, tail_k_state, tail_score_state, torch.where(valid_rows, state_ids, -1),
                 attn_metadata.q_seqlens, attn_metadata.kv_seqlens,
                 indexer_k_cache, attn_metadata.block_offsets,
                 self.indexer.index_kpool_compress_ape, self.index_kpool,
                 self.indexer.scale_fmt is not None)
-            save_raw()
             return indexer_k_cache
 
         q_seqlens = attn_metadata.q_seqlens.tolist()
         kv_seqlens = attn_metadata.kv_seqlens.tolist()
         if len(q_seqlens) != len(kv_seqlens):
             raise RuntimeError('KPool query/KV batch lengths do not match.')
-        if state_ids.numel() != len(q_seqlens):
+        if valid_rows.numel() != len(q_seqlens):
             raise RuntimeError(
                 'KPool state id count does not match the request batch.')
 
@@ -963,18 +951,12 @@ class Glm5NextSparseAttention(DeepseekV32Attention):
             if history_len < 0:
                 raise RuntimeError(
                     f'KPool received q_len={q_len} greater than kv_len={kv_len}.')
-            state_id = int(state_ids[batch_idx].item())
+            if not bool(valid_rows[batch_idx]):
+                token_offset += q_len
+                continue
             previous_tail_len = history_len % self.index_kpool
-            if state_id >= 0:
-                previous_tail_k = tail_k_state[
-                    state_id, :previous_tail_len]
-                previous_tail_score = tail_score_state[
-                    state_id, :previous_tail_len]
-            else:
-                previous_tail_k = key.new_zeros(
-                    previous_tail_len, self.indexer.head_dim)
-                previous_tail_score = score.new_zeros(
-                    previous_tail_len, self.indexer.head_dim)
+            previous_tail_k = tail_k_state[batch_idx, :previous_tail_len]
+            previous_tail_score = tail_score_state[batch_idx, :previous_tail_len]
 
             token_end = token_offset + q_len
             update = kpool_partition_update(
@@ -990,8 +972,7 @@ class Glm5NextSparseAttention(DeepseekV32Attention):
                     update.closed_keys,
                     update.closed_scores,
                     self.indexer.index_kpool_compress_ape,
-                    mode=('decode'
-                          if attn_metadata.is_decoding else 'extend'),
+                    mode='extend',
                     round_scale=self.indexer.scale_fmt is not None,
                 )
                 kpool_write_packed_cache(
@@ -1003,22 +984,12 @@ class Glm5NextSparseAttention(DeepseekV32Attention):
                     self.index_kpool,
                 )
 
-            if state_id >= 0:
-                tail_k_state[state_id].zero_()
-                tail_score_state[state_id].zero_()
-                tail_len = update.tail_keys.size(0)
-                if tail_len:
-                    tail_k_state[state_id, :tail_len].copy_(
-                        update.tail_keys)
-                    tail_score_state[state_id, :tail_len].copy_(
-                        update.tail_scores)
             token_offset = token_end
 
         if token_offset != key.size(0):
             raise RuntimeError(
                 f'KPool metadata accounts for {token_offset} tokens, '
                 f'but projections contain {key.size(0)}.')
-        save_raw()
         return indexer_k_cache
 
     def _select_kpool_indices(
@@ -1987,9 +1958,9 @@ class Glm5NextMTPAttention(Glm5NextSparseAttention):
         # The same projections feed both compressed pools and raw draft pages.
         key = self.indexer.project_key(hidden_states)[0]
         score = self.indexer.project_compress_score(hidden_states)[0]
-        result = super()._update_kpool_cache(
-            hidden_states, (tails[:, :, 0].contiguous(), tails[:, :, 1].contiguous()),
-            state_ids, attn_metadata, projected=(key, score))
+        result = self._write_kpool_pools(
+            key, score, (tails[:, :, 0].contiguous(), tails[:, :, 1].contiguous()),
+            state_ids >= 0, attn_metadata)
 
         # Write raw projected tokens after reading the pre-forward tail.
         # Rejected positions are overwritten on their next visit.

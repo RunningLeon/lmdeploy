@@ -19,7 +19,9 @@ from torch.profiler import record_function
 from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.disagg.config import EngineRole
 from lmdeploy.pytorch.long_context import (
+    get_long_context_chunk_capacity,
     get_long_context_chunk_limit,
+    limit_long_context_checkpoint,
     has_long_context_multimodal,
     plan_long_context_chunk,
     sort_long_context_multimodals,
@@ -198,7 +200,9 @@ class LongContextChunker:
         input_mm = seq.get_input_multimodals()
         # Only remaining multimodals are emitted by next_chunk_size().
         self.multimodals = sort_long_context_multimodals(input_mm)
-        self.max_prefill_num = get_long_context_chunk_limit(seq, self.max_prefill_token_num)
+        # Input/restore happens before set_seq; each new turn or re-admission
+        # rebuilds this capacity. Only history/checkpoint cuts vary while active.
+        self.max_prefill_num = get_long_context_chunk_capacity(seq, self.max_prefill_token_num)
         self.has_multimodal = has_long_context_multimodal(self.multimodals)
 
     def next_chunk_size(self):
@@ -207,7 +211,7 @@ class LongContextChunker:
         if seq is None:
             return 0, None
 
-        limit = get_long_context_chunk_limit(seq, self.max_prefill_num)
+        limit = limit_long_context_checkpoint(seq, self.max_prefill_num)
         plan = plan_long_context_chunk(seq, limit, self.multimodals)
         return plan.chunk_size, plan.multimodals
 
@@ -215,7 +219,7 @@ class LongContextChunker:
         """Is last chunk."""
         if self.seq is None:
             return True
-        limit = get_long_context_chunk_limit(self.seq, self.max_prefill_num)
+        limit = limit_long_context_checkpoint(self.seq, self.max_prefill_num)
         return self.seq.num_token_ids <= limit
 
     def clear(self):
@@ -430,8 +434,7 @@ class _ForwardInputsTask:
             # do not send an MTP-inclusive save with stale draft rows.
             return ()
         token_lens = inputs.history_lengths + inputs.seq_length
-        if (self.maker.spec_decoding and inputs.is_chunk and not inputs.is_last_chunk
-                and not getattr(inputs, 'draft_full_prefill', False)):
+        if self.maker.spec_decoding and inputs.is_chunk and not inputs.is_last_chunk:
             token_lens = token_lens.sub(1).clamp_min(0)
         return tuple(token_lens.tolist())
 
@@ -651,6 +654,8 @@ class _ForwardInputsTask:
                                                          is_last_chunk=is_last_chunk)
 
     def _build_prefill_inputs(self, seqs: 'SeqList'):
+        assert all(seq.kv_token_limit is None for seq in seqs), (
+            'Non-final chunks must use exclusive chunk inputs, not full prefill')
         maker = self.maker
         inputs = maker.create_model_inputs(seqs, True)
         cache_inputs = maker._prepare_prefill_cache_inputs(seqs)

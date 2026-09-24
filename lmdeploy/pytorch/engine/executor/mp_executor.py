@@ -64,7 +64,7 @@ class Notifier:
         if self._event_id == NUM_SHARED_BLOCK - 1:
             await event_loop.run_in_executor(None, self.bar.wait)
             [event.clear() for event in self.events]
-            await event_loop.run_in_executor(None, self.bar.wait)
+            self.bar.wait()
         self._update_event_id()
 
     @contextmanager
@@ -82,11 +82,8 @@ class Notifier:
         await event_loop.run_in_executor(None, self.events[self._event_id].wait)
         yield
         if self._event_id == NUM_SHARED_BLOCK - 1:
-            # A peer may need this event loop's pending forward task to issue
-            # a collective before it can reach the ring-wrap barrier. Keep
-            # both phases cooperative, just like the event wait above.
-            await event_loop.run_in_executor(None, self.bar.wait)
-            await event_loop.run_in_executor(None, self.bar.wait)
+            self.bar.wait()
+            self.bar.wait()
         self._update_event_id()
 
     def close(self):
@@ -284,7 +281,7 @@ class MPExecutor(ExecutorBase):
         def signal_handler(signum, frame):
             logger.error('Received custom termination signal from sub processing, exiting...')
             self.stop()
-            self.release(graceful=False)
+            self.release()
             os._exit(1)
 
         signal.signal(signal.SIGUSR1, signal_handler)
@@ -447,16 +444,10 @@ class MPExecutor(ExecutorBase):
         if self._prefetch_task is not None:
             self._prefetch_task.cancel()
 
-    def release(self, graceful: bool = True):
+    def release(self):
         """release."""
-        if graceful and self.procs and all(proc._proc is not None and proc._proc.is_alive() for proc in self.procs):
-            # Signals can interrupt ranks between matching CUDA collectives.
-            # Let the command loop drain worker tasks before releasing CUDA state.
-            self.collective_rpc('_shutdown', return_mask=0)
-        else:
-            # A failed worker cannot participate in a coordinated shutdown.
-            for proc in self.procs:
-                proc.close()
+        for proc in self.procs:
+            proc.close()
 
         for proc in self.procs:
             proc.join()
@@ -618,9 +609,6 @@ class ExecutorProc:
             if command is None:
                 continue
             method = command['method']
-            if method == '_shutdown':
-                await worker.stop_async()
-                return
             return_mask = command.get('return_mask', True)
             args = command.get('args', list())
             kwargs = command.get('kwargs', dict())

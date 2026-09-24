@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 from collections.abc import Callable
+from inspect import signature
 
 import torch
 import torch.distributed as dist
@@ -566,6 +567,20 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
 def _build_fused_moe_blocked_f8(spec: FusedMoEBlockedF8BuildSpec) -> FusedMoEBlockedF8Impl:
     """Build a CUDA blocked-FP8 fused MoE implementation."""
     if spec.ep_size > 1:
+        if spec.act_func is not None:
+            # Normal EP uses compact [tokens, 2H] inputs; LL uses padded
+            # [experts, tokens, 2H] inputs plus per-expert valid row counts.
+            # Validate both calling conventions before allocating EP resources,
+            # not by swallowing a callback's TypeError during a forward.
+            try:
+                callback_signature = signature(spec.act_func)
+                callback_signature.bind(None)
+                callback_signature.bind(None, masked_m=None)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    'Custom blocked-FP8 EP activation must support both '
+                    'act_func(input) and act_func(input, masked_m=counts), '
+                    'with per-expert masked rows for low-latency dispatch.') from error
         impl = FusedDeepEpMoEBlockedF8Impl(
             ep_size=spec.ep_size,
             ep_group=spec.ep_group,

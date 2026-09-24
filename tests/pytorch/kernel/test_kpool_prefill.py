@@ -83,13 +83,14 @@ def test_kpool_ragged_prefill_matches_reference(lengths, histories, round_scale,
     args = make_case(lengths, histories, round_scale, page_size)
     keys, scores, states, ids, q_lens, kv_lens, cache, blocks, ape, _ = args
     q_lens, kv_lens = q_lens.to(metadata_dtype), kv_lens.to(metadata_dtype)
+    initial_states = tuple(state.clone() for state in states)
     expected_states = tuple(state.clone() for state in states)
     expected_cache = cache.clone()
     reference_update(keys, scores, expected_states, ids, q_lens, kv_lens, expected_cache, blocks, ape, round_scale)
     candidate_update(keys, scores, states, ids, q_lens, kv_lens, cache, blocks, ape, round_scale)
     torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
-    for actual, expected in zip(states, expected_states):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for actual, initial in zip(states, initial_states):
+        torch.testing.assert_close(actual, initial, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize('page_size', [16, 64])
@@ -118,8 +119,8 @@ def test_kpool_ragged_prefill_graph_changes_layout_and_padding(page_size):
         cache.copy_(initial_cache)
         graph.replay()
         torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
-        for actual, expected in zip(states, expected_states):
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for actual, initial in zip(states, initial_states):
+            torch.testing.assert_close(actual, initial, rtol=0, atol=0)
 
 
 def test_kpool_prefill_layer_views_and_chunk_continuation():
@@ -138,10 +139,15 @@ def test_kpool_prefill_layer_views_and_chunk_continuation():
         keys.normal_()
         scores.normal_()
         reference_update(keys, scores, expected_states, ids, q_lens, kv_lens, expected_cache, blocks, ape, True)
+        before = tuple(bank.clone() for bank in banks)
         candidate_update(keys, scores, states, ids, q_lens, kv_lens, cache, blocks, ape, True)
         torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
-        for actual, expected in zip(banks, expected_banks):
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for bank, initial in zip(banks, before):
+            torch.testing.assert_close(bank, initial, rtol=0, atol=0)
+        # The pool assembler consumes scratch; the caller reconstructs the
+        # next tail from its raw owner. Use the independent oracle's tail.
+        for state, expected in zip(states, expected_states):
+            state.copy_(expected)
         kv_lens.add_(q_lens)
 
 
@@ -193,3 +199,30 @@ def test_kpool_compression_preserves_fp8_bytes_and_scales(width, pool, mode, rou
     dispatched = kpool_compress_quantize_cuda(keys, scores, ape, mode=mode, round_scale=round_scale)
     torch.testing.assert_close(dispatched[0].view(torch.uint8), expected[0].view(torch.uint8), rtol=0, atol=0)
     torch.testing.assert_close(dispatched[1], expected[1], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('page_size', [16, 64])
+def test_decode_masked_writer_matches_full_arena_reference(page_size):
+    from lmdeploy.pytorch.backends.cuda.kpool import kpool_write_decode_cuda
+    from lmdeploy.pytorch.nn.kpool import kpool_write_packed_cache_batched
+
+    torch.manual_seed(333)
+    # Layer/step-major views, inactive rows with duplicate and negative indices.
+    arena = torch.randint(0, 256, (40, 3, page_size, 1, 132), device='cuda', dtype=torch.uint8)
+    expected = arena.clone()
+    table = torch.arange(1, 33, device='cuda').reshape(4, 8)
+    values = torch.randn(4, 2, 128, device='cuda').to(torch.float8_e4m3fn)[:, 1]
+    scales = torch.rand(4, 2, device='cuda')[:, 1]
+    groups = torch.tensor([15, 16, -1, 500], device='cuda')
+    valid = torch.tensor([True, True, False, False], device='cuda')
+    kpool_write_packed_cache_batched(expected[:, 1], table, groups, values, scales, 4, valid)
+    kpool_write_decode_cuda(arena[:, 1], table, groups, values, scales, 4, valid)
+    assert torch.equal(arena, expected)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        kpool_write_decode_cuda(arena[:, 1], table, groups, values, scales, 4, valid)
+    groups.copy_(torch.tensor([16, 63, 64, 1], device='cuda'))
+    valid.copy_(torch.tensor([True, False, True, False], device='cuda'))
+    kpool_write_packed_cache_batched(expected[:, 1], table, groups, values, scales, 4, valid)
+    graph.replay()
+    assert torch.equal(arena, expected)

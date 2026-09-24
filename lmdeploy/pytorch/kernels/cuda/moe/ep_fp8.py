@@ -191,6 +191,8 @@ def fused_moe_v3_fp8(
     down_input_scale = get_mn_major_tma_aligned_tensor(down_input_scale)
     down_output = torch.empty((all_tokens, k), device=gather_out.device, dtype=torch.bfloat16)
     _deepgemm_grouped_fp8_nt_contiguous((down_input_fp8, down_input_scale), w2_weight_fp8, down_output, m_indices)
+    # Shared Normal FP8 EP policy (not GLM-only): reduce local top-k in
+    # FP32 before storing the BF16 partial for DeepEP combine.
     ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out,
               fp32_acc=True, output_scale=output_scale)
     return gather_out

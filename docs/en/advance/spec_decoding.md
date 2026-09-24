@@ -177,25 +177,15 @@ if __name__ == '__main__':
         print(cold.cached_tokens, warm.cached_tokens)
 ```
 
-### Cache geometry and boundaries
+### Configuration limits
 
-- The model normalizes its cache to **64-token logical blocks and 64-token
-  kernel pages, with 16-entry KPool storage pages**, including when prefix caching is disabled. An explicitly
-  configured `num_gpu_blocks` counts logical blocks, not kernel pages.
-- A hit needs both complete KV/KPool owners and an exact recurrent-state
-  checkpoint. Prefill may be split at an aligned boundary to create a reusable
-  checkpoint; at least one prompt token is left to compute the output. A short
-  prompt or an evicted checkpoint can therefore produce no hit.
-- MTP cache identity also includes the next prompt token needed by the shifted
-  draft input. Matching the first 64 tokens alone is insufficient if token 65
-  differs. Tentative draft tokens and the final sampled-token-dependent owner
-  are not published as shared prefixes.
-- `prefix_cache_state_budget` reserves additional state slots. Zero means no
-  dedicated reservation, not that checkpoint creation is disabled: idle runtime
-  slots may be borrowed. More slots consume more memory, especially with MTP.
-- Keep `prefix_cache_decode_state_interval=0` with MTP: this implementation
-  publishes prefill checkpoints only. Without MTP, nonzero intervals must be
-  multiples of 64. PD migration is not supported by this GLM cache layout.
+- Cache blocks contain 64 tokens. If setting `num_gpu_blocks` manually, count
+  these blocks rather than KPool entries.
+- `prefix_cache_state_budget` reserves extra checkpoint slots and uses additional
+  memory. Zero adds no reserved slots; idle runtime slots may still be reused.
+- With MTP, keep `prefix_cache_decode_state_interval=0`. Without MTP, positive
+  values must be multiples of 64.
+- PD migration is not supported.
 
 The native FP8 CUDA path also supports DP/EP serving, for example `--tp 2 --dp 2
 --ep 4`. Enable text-prefill PCG with `--piecewise-cudagraph-max-tokens 512`

@@ -25,8 +25,6 @@ from lmdeploy.pytorch.nn.kpool import (
     kpool_quantize_fp8,
 )
 
-from .gated_delta_rule import _state_scatter
-
 # Fuse the existing integer index expansion instead of materializing its
 # [tokens, topk] masks and int64 temporaries separately during batched prefill.
 _expand_prefill_groups = torch.compile(kpool_expand_selected_groups, dynamic=True, fullgraph=True)
@@ -36,7 +34,7 @@ def kpool_prefill_update_cuda(keys, scores, tail_keys, tail_scores, state_ids,
                               q_seqlens, kv_seqlens, packed_cache, block_offsets,
                               ape, pool_size, round_scale):
     """Batch ragged pool assembly without a host read or cache-arena copy."""
-    closed_keys, closed_scores, group_ids, requests, valid, next_keys, next_scores = partition_kpool(
+    closed_keys, closed_scores, group_ids, requests, valid = partition_kpool(
         keys, scores, tail_keys, tail_scores, state_ids, q_seqlens, kv_seqlens, pool_size)
     if closed_keys.size(0):
         values, scales = kpool_compress_quantize_cuda(
@@ -45,9 +43,19 @@ def kpool_prefill_update_cuda(keys, scores, tail_keys, tail_scores, state_ids,
         fill_indexed_key_cache(values, scales, group_ids, valid, block_offsets,
                                cache_keys, cache_scales, page_step=cache_keys.size(1) * pool_size // KPOOL_PAGE_SIZE,
                                request_ids=requests)
-    slots = torch.zeros_like(state_ids)
-    _state_scatter(tail_keys.unsqueeze(1), state_ids, slots, next_keys)
-    _state_scatter(tail_scores.unsqueeze(1), state_ids, slots, next_scores)
+
+
+def kpool_write_decode_cuda(packed_cache, block_offsets, group_ids, values, scales, pool_size, valid):
+    """Masked scatter for one decode step, with no read-modify-write.
+
+    The scheduler gives live requests private writable owners. Thus at most
+    one valid row writes each destination in this launch. Keep MTP steps in
+    separate launches: different steps may close the same logical pool.
+    """
+    cache_keys, cache_scales = kpool_packed_cache_views(packed_cache, values.size(-1))
+    fill_indexed_key_cache(values, scales, group_ids, valid, block_offsets,
+                           cache_keys, cache_scales,
+                           page_step=cache_keys.size(1) * pool_size // KPOOL_PAGE_SIZE)
 
 
 @functools.lru_cache
@@ -265,7 +273,7 @@ def kpool_score_paged_cuda(
     pooled_block_offsets: Tensor,
     page_size: int = 64,
 ) -> Tensor:
-    """Score pooled decode history with DeepGEMM's paged MQA primitive."""
+    """Score compact16 pages with Triton, or legacy page64 with DeepGEMM."""
     _validate_query(query_fp8, query_weight)
     rows = query_fp8.size(0)
     if packed_cache.dtype != torch.uint8 or packed_cache.ndim != 4:

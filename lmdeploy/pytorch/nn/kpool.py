@@ -548,14 +548,15 @@ def kpool_score(
 
 def kpool_pooled_block_offsets(token_block_offsets: Tensor, pool_size: int,
                                page_size: int = KPOOL_PAGE_SIZE) -> Tensor:
-    """Build the pooled page table by selecting every ``pool_size`` token
-    page."""
+    """Map compact16 owners directly; subsample columns for legacy page64."""
     _validate_pool_geometry(pool_size)
     if token_block_offsets.ndim < 1:
         raise ValueError('token_block_offsets must have at least one dimension.')
     stride = page_size * pool_size // KPOOL_PAGE_SIZE
     if page_size * pool_size % KPOOL_PAGE_SIZE or stride < 1:
         raise ValueError("KPool storage pages must cover whole token pages.")
+    if stride == 1:
+        return token_block_offsets
     columns = torch.arange(0, token_block_offsets.size(-1), stride, device=token_block_offsets.device)
     return token_block_offsets.index_select(-1, columns)
 
@@ -588,7 +589,8 @@ def kpool_packed_cache_views(
     """Expose FP8 values and FP32 scales from one packed DSA cache row.
 
     The byte layout intentionally matches the existing DeepGEMM DSA cache:
-    every page stores all 64 value rows first, followed by all 64 scales.
+    each page stores its value rows first, followed by its scales. Compact
+    pages hold 16 rows; the legacy layout holds 64.
     """
     if packed_cache.dtype != torch.uint8:
         raise TypeError(
