@@ -33,11 +33,6 @@ def test_engine_worker_health_status_is_synchronous():
     assert worker.get_health_status() is status
 
 
-def _sleep_then_exit():
-    import time
-    time.sleep(0.2)
-
-
 class TestZMQRPC:
 
     def sub_proc(self, shared_dict=None, condition=None):
@@ -405,7 +400,8 @@ async def _async_test_zmq_process_sentinel_marks_backend_dead():
     from lmdeploy.pytorch.engine.mp_engine.zmq_rpc import AsyncRPCClient
 
     ctx = mp.get_context('spawn')
-    proc = ctx.Process(target=_sleep_then_exit)
+    exit_requested = ctx.Event()
+    proc = ctx.Process(target=exit_requested.wait)
     proc.start()
     assert proc.is_alive()
 
@@ -416,6 +412,11 @@ async def _async_test_zmq_process_sentinel_marks_backend_dead():
                             server_dead_callback=marked.set)
     try:
         client._register_server_sentinel()
+        assert not marked.is_set()
+        exit_requested.set()
+        # Allow spawn and normal process exit their own budget before checking notification.
+        proc.join(timeout=30)
+        assert proc.exitcode == 0, 'worker did not exit cleanly'
         await asyncio.wait_for(marked.wait(), timeout=5)
     finally:
         client.stop()
